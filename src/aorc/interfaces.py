@@ -143,6 +143,12 @@ class GitHubClient(ABC):
     @abstractmethod
     def merge_pull_request(self, number: int, method: str = "merge") -> None: ...
 
+    @abstractmethod
+    def delete_branch(self, branch: str) -> None:
+        """Delete a branch on the remote. Used by the three fixed
+        branch-cleanup cases (S4): merged -> delete, everything else keeps
+        the branch."""
+
     # ---- repo contents ----------------------------------------------------- #
     # Used to check whether a stage's artifact (design doc, test file, ...) is
     # actually committed to a branch -- the label alone is never sufficient.

@@ -96,6 +96,9 @@ class MockGitHubClient(GitHubClient):
         pr.merged = True
         pr.state = "closed"
 
+    def delete_branch(self, branch: str) -> None:
+        self.calls.append(("delete_branch", branch))
+
     # ---- repo contents ----------------------------------------------------- #
     def get_file(self, path: str, ref: str) -> str | None:
         return self.files.get((ref, path))

@@ -113,6 +113,9 @@ class SdkGitHubClient(GitHubClient):
     def merge_pull_request(self, number: int, method: str = "merge") -> None:
         self._r().get_pull(number).merge(merge_method=method)
 
+    def delete_branch(self, branch: str) -> None:
+        self._r().get_git_ref(f"heads/{branch}").delete()
+
     # ---- repo contents ----------------------------------------------------- #
     def get_file(self, path: str, ref: str) -> str | None:
         from github import GithubException  # lazy: only when a real call is made
