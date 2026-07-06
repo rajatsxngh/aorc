@@ -41,6 +41,9 @@ Make exactly one git commit at the end of a successful iteration. The commit mes
 3. Files changed
 4. Blockers or notes for the next iteration
 
+HONESTY IN COMMITS
+Never claim a test, check, or integration exists unless you actually created it in this repo this iteration. Do not write "exercised by integration tests" unless those test files really exist in tests/. If you only wrote unit tests against mocks, say so plainly: "real adapter NOT yet integration-tested — mocks only." Overstating what is proven is a defect.
+
 THE ISSUE
 If the task's acceptance criteria are fully met, move its issue file to `issues/done/`.
 If the task is only partially complete, leave the file in place and append a "## Progress notes" section recording exactly what was done and what remains, so the next iteration continues cleanly.
