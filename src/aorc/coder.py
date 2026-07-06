@@ -159,9 +159,14 @@ class CoderStage:
         *,
         repo_files: dict[str, str] | None = None,
         cwd: str = ".",
+        review_feedback: str | None = None,
     ) -> CoderResult:
         repo_files = dict(repo_files or {})
-        failure: str | None = None
+        # Reuses the same "what to fix" prompt slot the test-failure loop
+        # uses -- the reviewer's rejection reason is just another attempt's
+        # feedback, not a new context channel (S8: reviewer re-enters this
+        # same bounded fix loop instead of its own retry mechanism).
+        failure: str | None = f"Reviewer feedback: {review_feedback}" if review_feedback else None
         provider_retries = 0
         attempts = 0
         while attempts < self._max_retries:

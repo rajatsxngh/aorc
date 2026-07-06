@@ -63,6 +63,20 @@ def test_toolchain_and_failure_fields(tmp_path, monkeypatch):
     assert cfg.smoke and cfg.smoke[0]["input"] == "examples/case1.yml"
 
 
+def test_coverage_floor_defaults_and_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    cfg = load_config(_write(tmp_path, SAMPLE.format(primary_model="a", esc_model="b")))
+    assert cfg.coverage_command is None
+    assert cfg.coverage_floor == 80.0
+
+    with_coverage = SAMPLE.format(primary_model="a", esc_model="b") + (
+        "coverage:\n  command: coverage run -m pytest && coverage report\n  floor: 90\n"
+    )
+    cfg = load_config(_write(tmp_path, with_coverage))
+    assert cfg.coverage_command == "coverage run -m pytest && coverage report"
+    assert cfg.coverage_floor == 90.0
+
+
 def test_local_base_url_slot(tmp_path):
     text = """\
 llm:

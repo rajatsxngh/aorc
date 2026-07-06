@@ -31,3 +31,4 @@ Real parallelism with correctness. This replaces S4's trivial checkpoint verdict
 ## Blocked by
 
 - S4 (checkpoint harness), S9 (Graphify blast-radius)
+- 09b (checkpoint injection) — collision logic cannot plug in until the checkpoint is injectable and can see other issues/PRs

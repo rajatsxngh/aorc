@@ -46,6 +46,8 @@ class AorcConfig:
     test: str | None = None
     lint: str | None = None
     smoke: list[dict] = field(default_factory=list)
+    coverage_command: str | None = None
+    coverage_floor: float = 80.0
     merge_auto: bool = False
     primary_attempts: int = 3
     escalation_attempts: int = 1
@@ -118,6 +120,10 @@ def parse_config(raw: dict) -> AorcConfig:
     if not isinstance(smoke, list):
         raise ConfigError("`smoke` must be a list of {input, expect} examples")
 
+    coverage = raw.get("coverage") or {}
+    if not isinstance(coverage, dict):
+        raise ConfigError("`coverage` must be a mapping")
+
     return AorcConfig(
         primary=primary,
         escalation=escalation,
@@ -125,6 +131,8 @@ def parse_config(raw: dict) -> AorcConfig:
         test=raw.get("test"),
         lint=raw.get("lint"),
         smoke=smoke,
+        coverage_command=coverage.get("command"),
+        coverage_floor=float(coverage.get("floor", 80.0)),
         merge_auto=bool(merge.get("auto", False)),
         primary_attempts=int(failure.get("primary_attempts", 3)),
         escalation_attempts=int(failure.get("escalation_attempts", 1)),
