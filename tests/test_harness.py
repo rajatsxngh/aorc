@@ -362,6 +362,23 @@ def test_private_default_registries_would_miss_the_collision_two_unshared_harnes
     assert second == "proceed"  # documents the gap: no PR yet, private registries
 
 
+@pytest.mark.parametrize(
+    "reported",
+    ["./src/aorc/foo.py", "src//aorc/foo.py", "/src/aorc/foo.py", "src/aorc/./foo.py"],
+)
+def test_verdict_holds_when_same_file_is_written_differently(reported):
+    """The same file spelled two ways is still the same file -- a path-format
+    mismatch between sources (container report vs registry vs PR list) must
+    not silently defeat the collision check."""
+    registry = InFlightRegistry()
+    registry.record(1, ["src/aorc/foo.py"])
+    checkpoint = Checkpoint(registry=registry)
+
+    verdict = checkpoint.verdict(CheckpointReport(issue_number=2, files=[reported]))
+
+    assert verdict == "hold"
+
+
 def test_harness_threads_graphify_into_default_checkpoint(tmp_path):
     repo = _init_repo(tmp_path)
     worktrees = WorktreeManager(str(repo), str(tmp_path / "worktrees"))

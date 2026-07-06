@@ -25,6 +25,7 @@ up-front selector (concurrency ceiling + declared blockers) that runs
 from __future__ import annotations
 
 import os
+import posixpath
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -173,6 +174,19 @@ class InFlightRegistry:
         self._claims.pop(issue_number, None)
 
 
+def _normalize_path(path: str) -> str:
+    """Canonical repo-relative POSIX form, so the same file spelled two ways
+    (`./x`, `x//y`, a leading `/`, `a/./b`) intersects correctly. Collision
+    inputs come from three sources (container reports, the registry, PR file
+    lists) with no shared format guarantee -- a mismatch here would silently
+    yield "proceed" on a real collision."""
+    return posixpath.normpath(path.replace("\\", "/")).lstrip("/")
+
+
+def _normalize_paths(files) -> set[str]:
+    return {_normalize_path(f) for f in files}
+
+
 class Checkpoint:
     """Post-Design checkpoint: the container reports its exact file list and
     waits for a verdict before continuing.
@@ -204,13 +218,13 @@ class Checkpoint:
         merge)."""
         others: set[str] = set()
         for files in self.registry.claimed_by_others(report.issue_number).values():
-            others.update(files)
+            others.update(_normalize_paths(files))
         if self.github is not None:
             my_branch = branch_name(report.issue_number)
             for pr in self.github.list_pull_requests(state="open"):
                 if pr.head == my_branch:
                     continue
-                others.update(pr.files)
+                others.update(_normalize_paths(pr.files))
         return others
 
     def _collides(self, my_files: set[str], others: set[str]) -> bool:
@@ -223,16 +237,16 @@ class Checkpoint:
         forward = self.graphify.blast_radius(list(my_files))
         if not forward.ok:
             return True  # query failed/uncertain -> conservative hold
-        if forward.files & others:
+        if _normalize_paths(forward.files) & others:
             return True
         backward = self.graphify.blast_radius(list(others))
         if not backward.ok:
             return True
-        return bool(backward.files & my_files)
+        return bool(_normalize_paths(backward.files) & my_files)
 
     def verdict(self, report: CheckpointReport) -> str:
         others = self._collision_set(report)
-        collides = self._collides(set(report.files), others)
+        collides = self._collides(_normalize_paths(report.files), others)
         self.registry.record(report.issue_number, report.files)
         return "hold" if collides else "proceed"
 
