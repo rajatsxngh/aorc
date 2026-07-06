@@ -106,6 +106,12 @@ class GitHubClient(ABC):
     @abstractmethod
     def close_issue(self, number: int) -> None: ...
 
+    @abstractmethod
+    def create_issue(
+        self, title: str, body: str, labels: list[str] | None = None
+    ) -> Issue:
+        """Create a new issue. Used by S12 to open decomposed sub-issues."""
+
     # ---- comments -------------------------------------------------------- #
     @abstractmethod
     def post_comment(self, issue_number: int, body: str) -> Comment: ...

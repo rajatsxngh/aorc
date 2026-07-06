@@ -35,6 +35,7 @@ class MockGitHubClient(GitHubClient):
         self.calls: list[tuple] = []
         self._next_comment_id = 1
         self._next_pr_number = max([p.number for p in self.pulls.values()], default=1000)
+        self._next_issue_number = max([i.number for i in self.issues.values()], default=0) + 1
 
     # ---- issues ---------------------------------------------------------- #
     def get_issue(self, number: int) -> Issue:
@@ -46,6 +47,13 @@ class MockGitHubClient(GitHubClient):
     def close_issue(self, number: int) -> None:
         self.calls.append(("close_issue", number))
         self.issues[number].state = "closed"
+
+    def create_issue(self, title: str, body: str, labels: list[str] | None = None) -> Issue:
+        issue = Issue(number=self._next_issue_number, title=title, body=body, labels=list(labels or []))
+        self.issues[issue.number] = issue
+        self._next_issue_number += 1
+        self.calls.append(("create_issue", issue.number, title))
+        return issue
 
     # ---- comments -------------------------------------------------------- #
     def post_comment(self, issue_number: int, body: str) -> Comment:

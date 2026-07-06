@@ -81,6 +81,16 @@ def test_close_issue():
     assert gh.get_issue(1).state == "closed"
 
 
+def test_create_issue_assigns_number_and_labels():
+    gh = MockGitHubClient(issues=[Issue(number=5)])
+    issue = gh.create_issue("Sub-issue", "body text", labels=["depth:1"])
+
+    assert issue.number == 6
+    assert gh.get_issue(6).title == "Sub-issue"
+    assert gh.get_issue(6).labels == ["depth:1"]
+    assert ("create_issue", 6, "Sub-issue") in gh.calls
+
+
 def test_commit_file_then_readable_via_get_file():
     gh = MockGitHubClient(issues=[Issue(number=1)])
     assert gh.get_file("aorc/issue-1/design.md", "aorc/issue-1") is None

@@ -150,6 +150,9 @@ class SdkGitHubClient(GitHubClient):
     def close_issue(self, number: int) -> None:
         self._r().get_issue(number).edit(state="closed")
 
+    def create_issue(self, title: str, body: str, labels: list[str] | None = None) -> Issue:
+        return _to_issue(self._r().create_issue(title=title, body=body, labels=list(labels or [])))
+
     # ---- comments -------------------------------------------------------- #
     def post_comment(self, issue_number: int, body: str) -> Comment:
         c = self._r().get_issue(issue_number).create_comment(body)
