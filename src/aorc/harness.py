@@ -67,10 +67,20 @@ class CheckpointReport:
 
 
 class ContainerRuntime(ABC):
-    """Dispatch/teardown of the per-issue build container."""
+    """Dispatch/teardown of the per-issue build container. `env` is the
+    container's complete credential surface (S15): the per-issue GitHub
+    token and the LLM key, built by `credentials.CredentialBroker` -- the
+    App private key can never appear here because the broker fails closed
+    before it ever would."""
 
     @abstractmethod
-    def start(self, issue_number: int, branch: str, worktree_path: str) -> ContainerHandle: ...
+    def start(
+        self,
+        issue_number: int,
+        branch: str,
+        worktree_path: str,
+        env: dict[str, str] | None = None,
+    ) -> ContainerHandle: ...
 
     @abstractmethod
     def teardown(self, handle: ContainerHandle) -> None: ...
@@ -82,9 +92,16 @@ class MockContainerRuntime(ContainerRuntime):
 
     def __init__(self) -> None:
         self.calls: list[tuple] = []
+        self.envs: dict[int, dict[str, str] | None] = {}
         self._next_id = 1
 
-    def start(self, issue_number: int, branch: str, worktree_path: str) -> ContainerHandle:
+    def start(
+        self,
+        issue_number: int,
+        branch: str,
+        worktree_path: str,
+        env: dict[str, str] | None = None,
+    ) -> ContainerHandle:
         handle = ContainerHandle(
             issue_number=issue_number,
             branch=branch,
@@ -93,6 +110,7 @@ class MockContainerRuntime(ContainerRuntime):
         )
         self._next_id += 1
         self.calls.append(("start", issue_number, branch))
+        self.envs[issue_number] = env
         return handle
 
     def teardown(self, handle: ContainerHandle) -> None:
@@ -109,11 +127,21 @@ class DockerContainerRuntime(ContainerRuntime):
     def __init__(self, base_image: str) -> None:
         self._base_image = base_image
 
-    def start(self, issue_number: int, branch: str, worktree_path: str) -> ContainerHandle:
+    def start(
+        self,
+        issue_number: int,
+        branch: str,
+        worktree_path: str,
+        env: dict[str, str] | None = None,
+    ) -> ContainerHandle:
         name = f"aorc-issue-{issue_number}"
+        env_args: list[str] = []
+        for key, value in (env or {}).items():
+            env_args += ["-e", f"{key}={value}"]
         subprocess.run(
             [
                 "docker", "run", "-d", "--name", name,
+                *env_args,
                 "-v", f"{worktree_path}:/workspace",
                 "-w", "/workspace",
                 self._base_image,
@@ -292,10 +320,15 @@ class ContainerHarness:
         )
         self._compute_guard = compute_guard if compute_guard is not None else ComputeGuard()
 
-    def dispatch(self, issue_number: int) -> ContainerHandle:
+    def dispatch(
+        self, issue_number: int, env: dict[str, str] | None = None
+    ) -> ContainerHandle:
+        """`env` is the container's credential surface, built by
+        `credentials.CredentialBroker.container_env` (S15) -- per-issue
+        GitHub token + LLM key only, never the App private key."""
         branch = branch_name(issue_number)
         path = self._worktrees.ensure(issue_number)
-        return self._runtime.start(issue_number, branch, path)
+        return self._runtime.start(issue_number, branch, path, env)
 
     def checkpoint(self, report: CheckpointReport) -> str:
         return self._checkpoint.verdict(report)
