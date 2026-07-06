@@ -28,7 +28,7 @@ import json
 from dataclasses import dataclass, field
 
 from .design import DesignDoc
-from .interfaces import GitHubClient, LLMClient, Message
+from .interfaces import GitHubClient, LLMClient, Message, ProviderError
 from .pipeline import branch_name
 from .tester import TestRunner, TestRunResult, generated_test_path
 
@@ -36,12 +36,10 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_MAX_PROVIDER_RETRIES = 3
 DEFAULT_TEST_COMMAND = "pytest -q"
 
-
-class ProviderError(Exception):
-    """Raised by an `LLMClient` adapter on a transient provider failure
-    (429/500/timeout/connection reset) -- categorically different from bad
-    model output. Full backoff policy lands in S14; here it's enough that
-    this failure mode never burns a fix-loop attempt."""
+# `ProviderError` moved to interfaces.py in S14 (it is the seam's error
+# contract, shared with escalation.py and the adapters); re-exported here so
+# existing imports keep working.
+__all__ = ["CoderDoc", "CoderResult", "CoderStage", "ProviderError"]
 
 
 _CODER_SYSTEM_PROMPT = (

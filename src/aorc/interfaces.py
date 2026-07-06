@@ -12,6 +12,37 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # --------------------------------------------------------------------------- #
+# Seam error contract (S14)
+# --------------------------------------------------------------------------- #
+# Adapters translate provider/GitHub failures into these types so orchestrator
+# logic can route them mechanically without ever touching an SDK exception.
+
+
+class ProviderError(Exception):
+    """Raised by an `LLMClient` adapter on a transient provider failure
+    (429/500/timeout/connection reset) -- categorically different from bad
+    model output, and kept on a separate counter (S14): backoff retries the
+    *same* model; only backoff exhaustion counts as one real failure."""
+
+
+class FailFastProviderError(ProviderError):
+    """A provider failure that is *not* transient and must never be retried:
+    the Local-LLM constraint (a local `base_url` configured on a cloud
+    runner, where connection-refused will never heal). S18 owns detecting
+    and raising it; S14's backoff surfaces it immediately."""
+
+
+class GitHubRateLimitError(Exception):
+    """A GitHub 403/429 secondary rate limit. Carries the `Retry-After`
+    value when the response included one. Backed off and retried, never
+    counted as a pipeline failure (S14)."""
+
+    def __init__(self, message: str = "", retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+# --------------------------------------------------------------------------- #
 # LLM seam
 # --------------------------------------------------------------------------- #
 

@@ -6,7 +6,7 @@ third-party deps; only an actual `.complete()` call touches `anthropic`.
 
 from __future__ import annotations
 
-from ..interfaces import Completion, LLMClient, Message
+from ..interfaces import Completion, LLMClient, Message, ProviderError
 
 
 class ClaudeLLMClient(LLMClient):
@@ -49,6 +49,8 @@ class ClaudeLLMClient(LLMClient):
         max_tokens: int = 1024,
         temperature: float = 0.0,
     ) -> Completion:
+        import anthropic  # lazy: only when a real call is made
+
         client = self._ensure_client()
         # Anthropic takes the system prompt as a separate arg, not a turn.
         system = "\n".join(m.content for m in messages if m.role == "system")
@@ -63,7 +65,19 @@ class ClaudeLLMClient(LLMClient):
         }
         if system:
             create_kwargs["system"] = system
-        resp = client.messages.create(**create_kwargs)
+        # S14 seam error contract: transient transport/429/5xx failures become
+        # `ProviderError` so orchestrator backoff can retry the same model.
+        # Anything else (400 bad request, 401 auth) is not transient and
+        # propagates untouched. NOT integration-tested here (mocks only) --
+        # exercising the real SDK error paths is S19's job.
+        try:
+            resp = client.messages.create(**create_kwargs)
+        except anthropic.APIConnectionError as exc:  # incl. timeouts
+            raise ProviderError(f"connection error: {exc}") from exc
+        except anthropic.APIStatusError as exc:
+            if exc.status_code == 429 or exc.status_code >= 500:
+                raise ProviderError(f"provider {exc.status_code}: {exc}") from exc
+            raise
         text = "".join(
             block.text for block in resp.content if getattr(block, "type", None) == "text"
         )
