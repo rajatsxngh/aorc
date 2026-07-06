@@ -54,6 +54,15 @@ def test_projects_board_column_derived_not_direct_but_settable_via_client():
     assert gh.get_board_column(1) == "In Progress"
 
 
+def test_board_is_noop_when_no_project_configured():
+    # mirrors SdkGitHubClient(project=None): board is a derived, display-only
+    # projection of the label, so an unconfigured board never records or crashes.
+    gh = MockGitHubClient(issues=[Issue(number=1)], project=None)
+    gh.set_board_column(1, "In Progress")
+    assert gh.get_board_column(1) is None
+    assert not any(c[0] == "set_board_column" for c in gh.calls)
+
+
 def test_close_issue():
     gh = MockGitHubClient(issues=[Issue(number=1)])
     gh.close_issue(1)

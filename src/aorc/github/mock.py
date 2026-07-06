@@ -9,13 +9,23 @@ from __future__ import annotations
 
 from ..interfaces import Comment, GitHubClient, Issue, PullRequest
 
+# Sentinel: by default the mock models a *configured* board (records columns),
+# matching its role as the idealized in-memory reference. Pass `project=None`
+# to model the real adapter's unconfigured no-op board instead.
+_CONFIGURED = object()
+
 
 class MockGitHubClient(GitHubClient):
     def __init__(
         self,
         issues: list[Issue] | None = None,
         pulls: list[PullRequest] | None = None,
+        *,
+        project: object = _CONFIGURED,
     ) -> None:
+        # None => unconfigured board (board ops no-op, mirroring SdkGitHubClient);
+        # anything else => configured board that records columns.
+        self._project = None if project is None else project
         self.issues: dict[int, Issue] = {i.number: i for i in (issues or [])}
         self.pulls: dict[int, PullRequest] = {p.number: p for p in (pulls or [])}
         self.comments: dict[int, list[Comment]] = {}
@@ -109,8 +119,12 @@ class MockGitHubClient(GitHubClient):
 
     # ---- projects board -------------------------------------------------- #
     def set_board_column(self, issue_number: int, column: str) -> None:
+        if self._project is None:
+            return  # unconfigured board: no-op, mirroring SdkGitHubClient
         self.calls.append(("set_board_column", issue_number, column))
         self.board[issue_number] = column
 
     def get_board_column(self, issue_number: int) -> str | None:
+        if self._project is None:
+            return None
         return self.board.get(issue_number)
