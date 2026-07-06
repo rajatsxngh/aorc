@@ -27,6 +27,7 @@ Real parallelism with correctness. This replaces S4's trivial checkpoint verdict
 - [ ] Collision set includes open unmerged AORC PRs, treated like live file lists
 - [ ] Computation = path-intersect OR Graphify blast-radius; uncertain/timeout → hold
 - [ ] File lists persisted to GitHub; collision picture rebuilt from scratch each wake
+- [ ] Uses a SHARED InFlightRegistry across all concurrent harnesses (not each harness's private default), or cross-issue collision detection silently never fires. A test must prove two concurrent issues claiming the same file actually collide.
 
 ## Blocked by
 
