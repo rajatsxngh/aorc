@@ -27,7 +27,8 @@ The blast-radius bound for unattended agents, in three mechanical pieces:
   Fully deterministic, no LLM judgment. `ScrubbingGitHubClient` decorates
   any `GitHubClient` (same style as S14's `RateLimitedGitHubClient`) so
   every agent-authored text surface -- comments, issue bodies, PR text,
-  committed file content -- is scrubbed before it reaches GitHub.
+  committed file content, and (since S16) label names and branch names --
+  is scrubbed before it reaches GitHub.
 
 GitHub and LLM credentials stay in separate slots with separate lifetimes:
 `GITHUB_TOKEN` holds the per-issue ~1h installation token; `AORC_LLM_API_KEY`
@@ -40,10 +41,12 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
-from .harness import ContainerHandle, ContainerHarness
 from .interfaces import Comment, GitHubClient, Issue, PullRequest
+
+if TYPE_CHECKING:  # annotation-only: harness imports the leak check from here
+    from .harness import ContainerHandle, ContainerHarness
 
 TOKEN_TTL_SECONDS = 3600.0  # ~1 hour, per the credential model
 
@@ -158,14 +161,29 @@ class CredentialBroker:
         if self._llm_api_key is not None:
             env[LLM_API_KEY_ENV] = self._llm_api_key
         for slot, value in env.items():
-            if (self._private_key and self._private_key in value) or (
-                _PRIVATE_KEY_BLOCK_RE.search(value)
-            ):
+            if self._private_key and self._private_key in value:
                 raise CredentialLeakError(
                     f"container env slot {slot} would carry a private key; "
                     "the signing key never enters a container"
                 )
+        assert_env_clean(env)
         return env
+
+
+def assert_env_clean(env: dict[str, str]) -> None:
+    """Leak check for any env about to reach a container runtime: raise
+    `CredentialLeakError` on any private-key-shaped value. Tokens and provider
+    keys are what an env legitimately carries, so only PEM blocks trip it.
+    `ContainerHarness.dispatch` runs every incoming env through this (S16),
+    so a hand-built env can never smuggle the master credential past the
+    broker; `container_env` additionally checks against the broker's actual
+    key, which only the broker knows."""
+    for slot, value in env.items():
+        if _PRIVATE_KEY_BLOCK_RE.search(value):
+            raise CredentialLeakError(
+                f"container env slot {slot} carries a private-key block; "
+                "container env must come from CredentialBroker.container_env"
+            )
 
 
 def handle_token_expiry(
@@ -194,8 +212,8 @@ def scrub(text: str) -> str:
 
 class ScrubbingGitHubClient(GitHubClient):
     """Decorator: scrubs every agent-authored text argument on the mutating
-    surfaces (comments, issue text, PR text, committed content) before it
-    reaches GitHub. Reads and non-text mutations delegate untouched."""
+    surfaces (comments, issue text, PR text, committed content, label names,
+    branch names) before it reaches GitHub. Reads delegate untouched."""
 
     def __init__(self, inner: GitHubClient) -> None:
         self._inner = inner
@@ -223,28 +241,32 @@ class ScrubbingGitHubClient(GitHubClient):
         return self._inner.list_comments(issue_number)
 
     # ---- labels ---------------------------------------------------------- #
+    # Label *names* are scrubbed too (S16): a secret can ride in a name just
+    # as well as in a description. `remove_label` scrubs so removal matches
+    # whatever name `add_label` actually wrote.
     def get_labels(self, issue_number: int) -> list[str]:
         return self._inner.get_labels(issue_number)
 
     def add_label(self, issue_number: int, label: str) -> None:
-        return self._inner.add_label(issue_number, label)
+        return self._inner.add_label(issue_number, scrub(label))
 
     def remove_label(self, issue_number: int, label: str) -> None:
-        return self._inner.remove_label(issue_number, label)
+        return self._inner.remove_label(issue_number, scrub(label))
 
     def set_labels(self, issue_number: int, labels: list[str]) -> None:
-        return self._inner.set_labels(issue_number, labels)
+        return self._inner.set_labels(issue_number, [scrub(l) for l in labels])
 
     def create_label(
         self, name: str, color: str = "ededed", description: str = ""
     ) -> None:
-        return self._inner.create_label(name, color, scrub(description))
+        return self._inner.create_label(scrub(name), color, scrub(description))
 
     # ---- pull requests --------------------------------------------------- #
     def open_pull_request(
         self, title: str, body: str, head: str, base: str = "main"
     ) -> PullRequest:
-        return self._inner.open_pull_request(scrub(title), scrub(body), head, base)
+        # branch names are agent-authored text too (S16)
+        return self._inner.open_pull_request(scrub(title), scrub(body), scrub(head), base)
 
     def get_pull_request(self, number: int) -> PullRequest:
         return self._inner.get_pull_request(number)
@@ -263,7 +285,7 @@ class ScrubbingGitHubClient(GitHubClient):
         return self._inner.get_file(path, ref)
 
     def commit_file(self, branch: str, path: str, content: str, message: str) -> None:
-        return self._inner.commit_file(branch, path, scrub(content), scrub(message))
+        return self._inner.commit_file(scrub(branch), path, scrub(content), scrub(message))
 
     # ---- projects board -------------------------------------------------- #
     def set_board_column(self, issue_number: int, column: str) -> None:

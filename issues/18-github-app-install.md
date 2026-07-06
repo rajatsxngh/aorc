@@ -22,6 +22,15 @@ The install experience that ties the whole system to a repo — built last so it
 - [ ] Missing `smoke:` → run + skip smoke gate + permanent auto-merge disqualification + one-time warning
 - [ ] Local `base_url` on a cloud runner → clear fail-fast error
 
+## Known limitation inherited from S15/S16 (address here or in S19)
+
+A container holding `GITHUB_TOKEN` can push or hit the API **directly**,
+bypassing the orchestrator-side `ScrubbingGitHubClient` entirely — layer-2
+scrubbing only covers orchestrator-mediated writes. When wiring real container
+plumbing: route agent pushes through an orchestrator-mediated path or a
+scrubbing egress proxy, and stop passing secrets as `docker run -e KEY=value`
+(visible in host `ps`; `DockerContainerRuntime.start` does this today).
+
 ## Blocked by
 
 - S2 (labels/board), S17 (full pipeline + push-to-main rollback behavior to wire webhooks against)

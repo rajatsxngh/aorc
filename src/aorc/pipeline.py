@@ -11,6 +11,12 @@ from __future__ import annotations
 
 from .interfaces import GitHubClient, Issue
 
+# `aorc-held` (S16) is the auto-releasable dispatch-queue state -- waiting on
+# a blocker to close or a collision to clear -- distinct from `agent-blocked`,
+# which waits on a *human*. The wake loop sweeps held issues on every merge
+# webhook and cron tick; nothing sweeps agent-blocked.
+HELD_LABEL = "aorc-held"
+
 LABEL_COLUMN: dict[str, str] = {
     "needs-clarification": "Needs Clarification",
     "in-design": "In Progress",
@@ -18,6 +24,7 @@ LABEL_COLUMN: dict[str, str] = {
     "in-code": "In Progress",
     "in-review": "In Review",
     "agent-blocked": "Blocked",
+    HELD_LABEL: "Blocked",
 }
 BACKLOG_COLUMN = "Backlog"
 DONE_COLUMN = "Done"

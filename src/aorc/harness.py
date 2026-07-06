@@ -39,6 +39,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+from .credentials import assert_env_clean
 from .graphify import GraphifyClient
 from .guards import BLOCKED_LABEL, TIMEOUT_PING_MARKER, ComputeGuard, ComputeVerdict
 from .interfaces import GitHubClient
@@ -325,7 +326,12 @@ class ContainerHarness:
     ) -> ContainerHandle:
         """`env` is the container's credential surface, built by
         `credentials.CredentialBroker.container_env` (S15) -- per-issue
-        GitHub token + LLM key only, never the App private key."""
+        GitHub token + LLM key only, never the App private key. Every
+        incoming env is re-checked here (S16): a hand-built dict carrying
+        anything key-shaped raises `CredentialLeakError` before the runtime
+        ever sees it, so the broker is structurally the only viable source."""
+        if env is not None:
+            assert_env_clean(env)
         branch = branch_name(issue_number)
         path = self._worktrees.ensure(issue_number)
         return self._runtime.start(issue_number, branch, path, env)

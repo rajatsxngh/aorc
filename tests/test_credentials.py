@@ -340,7 +340,7 @@ def test_committed_file_content_and_message_are_scrubbed():
     assert "sk-ant-" not in commit_call[3]
 
 
-def test_reads_and_labels_pass_through_unscrubbed():
+def test_reads_pass_through_and_innocent_label_names_survive():
     inner = MockGitHubClient(issues=[Issue(number=5, title="t", body="b")])
     gh = ScrubbingGitHubClient(inner)
 
@@ -348,3 +348,46 @@ def test_reads_and_labels_pass_through_unscrubbed():
 
     assert gh.get_issue(5).title == "t"
     assert gh.get_labels(5) == ["agent-working"]
+
+
+def test_label_names_are_scrubbed_on_every_label_write():
+    # S16 closed this gap: a secret can ride in a label *name*, not just a
+    # description -- add/set/create/remove all scrub the name.
+    inner = MockGitHubClient(issues=[Issue(number=5)])
+    gh = ScrubbingGitHubClient(inner)
+    leaky_name = "leak-ghp_" + "c" * 36
+
+    gh.add_label(5, leaky_name)
+    assert all("ghp_" not in label for label in inner.issues[5].labels)
+
+    gh.remove_label(5, leaky_name)  # scrubbed the same way, so removal matches
+    assert inner.issues[5].labels == []
+
+    gh.set_labels(5, [leaky_name, "fine"])
+    assert all("ghp_" not in label for label in inner.issues[5].labels)
+    assert "fine" in inner.issues[5].labels
+
+    gh.create_label(leaky_name, description="d")
+    assert all("ghp_" not in name for name in inner.created_labels)
+
+
+def test_branch_names_are_scrubbed_on_pr_head_and_commit():
+    inner = MockGitHubClient()
+    gh = ScrubbingGitHubClient(inner)
+    leaky_branch = "leak-ghp_" + "c" * 36
+
+    pr = gh.open_pull_request("t", "b", head=leaky_branch)
+    assert "ghp_" not in pr.head
+
+    gh.commit_file(leaky_branch, "notes.md", "content", "msg")
+    assert all("ghp_" not in ref for (ref, _path) in inner.files)
+
+
+def test_assert_env_clean_rejects_key_shaped_values():
+    from aorc.credentials import assert_env_clean
+
+    with pytest.raises(CredentialLeakError):
+        assert_env_clean({"GITHUB_TOKEN": PRIVATE_KEY})
+
+    # real broker-shaped env passes
+    assert_env_clean({GITHUB_TOKEN_ENV: MINTED_TOKEN, LLM_API_KEY_ENV: "sk-" + "x" * 20})
