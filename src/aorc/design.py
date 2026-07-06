@@ -21,7 +21,7 @@ import json
 from dataclasses import dataclass, field
 
 from .graphify import GraphifyClient
-from .harness import CheckpointReport
+from .harness import CheckpointReport, InFlightRegistry
 from .interfaces import GitHubClient, LLMClient, Message
 from .pipeline import branch_name
 
@@ -91,6 +91,28 @@ def parse_design_response(text: str) -> DesignDoc | None:
 def checkpoint_report(issue_number: int, doc: DesignDoc) -> CheckpointReport:
     """The design doc's `files` field feeds the S4 checkpoint report."""
     return CheckpointReport(issue_number=issue_number, files=list(doc.files))
+
+
+def rebuild_in_flight_registry(
+    issue_numbers: list[int], github: GitHubClient
+) -> InFlightRegistry:
+    """S10 stateless bookkeeping: the orchestrator holds no memory between
+    wakes, so an in-process `InFlightRegistry` can't be trusted to survive a
+    restart. Rebuild a throwaway one from what's actually persisted to
+    GitHub -- each in-flight issue's design doc `files` field, already
+    committed to that issue's own branch by `DesignStage._commit` -- instead
+    of a separate state file. An issue with no design doc yet (or an
+    unparseable one) simply contributes no claim.
+    """
+    registry = InFlightRegistry()
+    for number in issue_numbers:
+        raw = github.get_file(design_doc_path(number), branch_name(number))
+        if raw is None:
+            continue
+        doc = parse_design_response(raw)
+        if doc is not None:
+            registry.record(number, list(doc.files))
+    return registry
 
 
 class DesignStage:

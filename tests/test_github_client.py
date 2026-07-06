@@ -48,6 +48,18 @@ def test_pull_request_open_and_merge():
     assert gh.get_pull_request(pr.number).merged is True
 
 
+def test_pull_request_carries_files_for_collision_checks():
+    pr = PullRequest(number=1, head="aorc/issue-9", files=["src/aorc/foo.py"])
+    gh = MockGitHubClient(pulls=[pr])
+
+    assert gh.get_pull_request(1).files == ["src/aorc/foo.py"]
+    assert gh.list_pull_requests()[0].files == ["src/aorc/foo.py"]
+
+
+def test_pull_request_files_default_to_empty_list():
+    assert PullRequest(number=1).files == []
+
+
 def test_projects_board_column_derived_not_direct_but_settable_via_client():
     gh = MockGitHubClient(issues=[Issue(number=1)])
     gh.set_board_column(1, "In Progress")

@@ -7,6 +7,7 @@ import subprocess
 import pytest
 
 from aorc.github.mock import MockGitHubClient
+from aorc.graphify import MockGraphifyClient
 from aorc.harness import (
     Checkpoint,
     CheckpointReport,
@@ -225,3 +226,151 @@ def test_harness_teardown_clears_the_issues_checkpoint_claim(tmp_path):
     harness.teardown(handle, outcome="held")
 
     assert registry.claimed_by_others(999) == {}
+
+
+# ---- S10: real collision verdict ------------------------------------------ #
+
+
+def test_verdict_holds_on_exact_file_intersection_with_another_in_flight_issue():
+    registry = InFlightRegistry()
+    registry.record(1, ["src/aorc/foo.py"])
+    checkpoint = Checkpoint(registry=registry)
+
+    verdict = checkpoint.verdict(CheckpointReport(issue_number=2, files=["src/aorc/foo.py"]))
+
+    assert verdict == "hold"
+
+
+def test_verdict_proceeds_when_file_sets_are_disjoint_and_no_blast_radius_link():
+    registry = InFlightRegistry()
+    registry.record(1, ["src/aorc/foo.py"])
+    graphify = MockGraphifyClient(edges={})
+    checkpoint = Checkpoint(registry=registry, graphify=graphify)
+
+    verdict = checkpoint.verdict(CheckpointReport(issue_number=2, files=["src/aorc/bar.py"]))
+
+    assert verdict == "proceed"
+
+
+def test_verdict_holds_on_forward_blast_radius_overlap():
+    # issue 2's file is depended on by src/aorc/foo.py, which issue 1 claims.
+    registry = InFlightRegistry()
+    registry.record(1, ["src/aorc/foo.py"])
+    graphify = MockGraphifyClient(edges={"src/aorc/bar.py": {"src/aorc/foo.py"}})
+    checkpoint = Checkpoint(registry=registry, graphify=graphify)
+
+    verdict = checkpoint.verdict(CheckpointReport(issue_number=2, files=["src/aorc/bar.py"]))
+
+    assert verdict == "hold"
+
+
+def test_verdict_holds_on_backward_blast_radius_overlap():
+    # issue 1's claimed file is depended on by issue 2's reported file.
+    registry = InFlightRegistry()
+    registry.record(1, ["src/aorc/foo.py"])
+    graphify = MockGraphifyClient(edges={"src/aorc/foo.py": {"src/aorc/bar.py"}})
+    checkpoint = Checkpoint(registry=registry, graphify=graphify)
+
+    verdict = checkpoint.verdict(CheckpointReport(issue_number=2, files=["src/aorc/bar.py"]))
+
+    assert verdict == "hold"
+
+
+def test_verdict_holds_conservatively_on_graphify_query_failure():
+    registry = InFlightRegistry()
+    registry.record(1, ["src/aorc/foo.py"])
+    graphify = MockGraphifyClient(edges={})
+    graphify.fail_next = True
+    checkpoint = Checkpoint(registry=registry, graphify=graphify)
+
+    verdict = checkpoint.verdict(CheckpointReport(issue_number=2, files=["src/aorc/bar.py"]))
+
+    assert verdict == "hold"
+
+
+def test_verdict_includes_open_unmerged_prs_in_collision_set():
+    gh = MockGitHubClient(
+        pulls=[PullRequest(number=1, head="aorc/issue-9", files=["src/aorc/foo.py"])]
+    )
+    checkpoint = Checkpoint(github=gh)
+
+    verdict = checkpoint.verdict(CheckpointReport(issue_number=2, files=["src/aorc/foo.py"]))
+
+    assert verdict == "hold"
+
+
+def test_verdict_ignores_own_open_pr_and_closed_prs():
+    gh = MockGitHubClient(
+        pulls=[
+            PullRequest(number=1, head="aorc/issue-2", files=["src/aorc/foo.py"]),
+            PullRequest(number=2, head="aorc/issue-3", state="closed", files=["src/aorc/bar.py"]),
+        ]
+    )
+    checkpoint = Checkpoint(github=gh)
+
+    verdict = checkpoint.verdict(CheckpointReport(issue_number=2, files=["src/aorc/foo.py"]))
+
+    assert verdict == "proceed"
+
+
+def test_verdict_proceeds_with_no_graphify_and_disjoint_files_path_intersect_only():
+    registry = InFlightRegistry()
+    registry.record(1, ["src/aorc/foo.py"])
+    checkpoint = Checkpoint(registry=registry)  # no graphify configured
+
+    verdict = checkpoint.verdict(CheckpointReport(issue_number=2, files=["src/aorc/bar.py"]))
+
+    assert verdict == "proceed"
+
+
+def test_shared_registry_across_two_harnesses_makes_cross_issue_collision_actually_fire(tmp_path):
+    """The AC this locks in: a *private* per-harness default registry would
+    let two concurrent issues silently both get "proceed" on the same file --
+    collision detection would never fire across harnesses. Sharing one
+    Checkpoint (and thus one InFlightRegistry) between two ContainerHarness
+    instances is what makes cross-issue collision real."""
+    repo = _init_repo(tmp_path)
+    worktrees = WorktreeManager(str(repo), str(tmp_path / "worktrees"))
+    gh = MockGitHubClient(issues=[Issue(number=1), Issue(number=2)])
+    shared_checkpoint = Checkpoint(github=gh, registry=InFlightRegistry())
+
+    harness_a = ContainerHarness(MockContainerRuntime(), worktrees, gh, checkpoint=shared_checkpoint)
+    harness_b = ContainerHarness(MockContainerRuntime(), worktrees, gh, checkpoint=shared_checkpoint)
+
+    first = harness_a.checkpoint(CheckpointReport(issue_number=1, files=["src/aorc/foo.py"]))
+    second = harness_b.checkpoint(CheckpointReport(issue_number=2, files=["src/aorc/foo.py"]))
+
+    assert first == "proceed"
+    assert second == "hold"
+
+
+def test_private_default_registries_would_miss_the_collision_two_unshared_harnesses(tmp_path):
+    """Contrast case: two harnesses each falling back to their own default
+    Checkpoint/registry never see each other's claims -- the exact failure
+    mode the shared-registry requirement guards against."""
+    repo = _init_repo(tmp_path)
+    worktrees = WorktreeManager(str(repo), str(tmp_path / "worktrees"))
+    gh = MockGitHubClient(issues=[Issue(number=1), Issue(number=2)])
+
+    harness_a = ContainerHarness(MockContainerRuntime(), worktrees, gh)
+    harness_b = ContainerHarness(MockContainerRuntime(), worktrees, gh)
+
+    first = harness_a.checkpoint(CheckpointReport(issue_number=1, files=["src/aorc/foo.py"]))
+    second = harness_b.checkpoint(CheckpointReport(issue_number=2, files=["src/aorc/foo.py"]))
+
+    assert first == "proceed"
+    assert second == "proceed"  # documents the gap: no PR yet, private registries
+
+
+def test_harness_threads_graphify_into_default_checkpoint(tmp_path):
+    repo = _init_repo(tmp_path)
+    worktrees = WorktreeManager(str(repo), str(tmp_path / "worktrees"))
+    gh = MockGitHubClient(issues=[Issue(number=1), Issue(number=2)])
+    graphify = MockGraphifyClient(edges={"src/aorc/bar.py": {"src/aorc/foo.py"}})
+    harness = ContainerHarness(MockContainerRuntime(), worktrees, gh, graphify=graphify)
+
+    first = harness.checkpoint(CheckpointReport(issue_number=1, files=["src/aorc/foo.py"]))
+    second = harness.checkpoint(CheckpointReport(issue_number=2, files=["src/aorc/bar.py"]))
+
+    assert first == "proceed"
+    assert second == "hold"

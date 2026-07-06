@@ -77,6 +77,18 @@ def test_coverage_floor_defaults_and_configured(tmp_path, monkeypatch):
     assert cfg.coverage_floor == 90.0
 
 
+def test_dispatch_concurrency_defaults_and_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    cfg = load_config(_write(tmp_path, SAMPLE.format(primary_model="a", esc_model="b")))
+    assert cfg.dispatch_concurrency == 5
+
+    with_dispatch = SAMPLE.format(primary_model="a", esc_model="b") + (
+        "dispatch:\n  concurrency: 8\n"
+    )
+    cfg = load_config(_write(tmp_path, with_dispatch))
+    assert cfg.dispatch_concurrency == 8
+
+
 def test_local_base_url_slot(tmp_path):
     text = """\
 llm:

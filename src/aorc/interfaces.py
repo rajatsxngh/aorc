@@ -88,6 +88,7 @@ class PullRequest:
     base: str = "main"
     state: str = "open"  # "open" | "closed"
     merged: bool = False
+    files: list[str] = field(default_factory=list)
 
 
 class GitHubClient(ABC):

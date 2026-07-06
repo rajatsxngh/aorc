@@ -93,6 +93,10 @@ def _to_issue(gh_issue) -> Issue:
 
 
 def _to_pr(pr) -> PullRequest:
+    # `get_files()` is one extra real API call per PR -- needed so S10's
+    # collision check can treat an open PR's changed files exactly like a
+    # live container's reported file list (not yet exercised by the unit
+    # suite; real behavior belongs to S19's integration coverage).
     return PullRequest(
         number=pr.number,
         title=pr.title or "",
@@ -101,6 +105,7 @@ def _to_pr(pr) -> PullRequest:
         base=pr.base.ref,
         state=pr.state,
         merged=pr.merged,
+        files=[f.filename for f in pr.get_files()],
     )
 
 

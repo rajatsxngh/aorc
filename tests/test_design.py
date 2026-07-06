@@ -9,6 +9,7 @@ from aorc.design import (
     checkpoint_report,
     design_doc_path,
     parse_design_response,
+    rebuild_in_flight_registry,
 )
 from aorc.github.mock import MockGitHubClient
 from aorc.interfaces import Issue
@@ -169,3 +170,40 @@ def test_checkpoint_report_carries_files_from_design_doc():
 
     assert report.issue_number == 7
     assert report.files == ["src/aorc/add.py"]
+
+
+def test_rebuild_in_flight_registry_reads_committed_design_docs():
+    gh = MockGitHubClient(issues=[Issue(number=1), Issue(number=2)])
+    gh.commit_file(branch_name(1), design_doc_path(1), _VALID, message="design: #1")
+
+    registry = rebuild_in_flight_registry([1, 2], gh)
+
+    assert registry.claimed_by_others(999) == {1: ["src/aorc/add.py"]}
+
+
+def test_rebuild_in_flight_registry_skips_issues_with_no_design_doc_yet():
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+
+    registry = rebuild_in_flight_registry([1], gh)
+
+    assert registry.claimed_by_others(999) == {}
+
+
+def test_rebuild_in_flight_registry_skips_unparseable_design_doc():
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    gh.commit_file(branch_name(1), design_doc_path(1), "not json", message="design: #1")
+
+    registry = rebuild_in_flight_registry([1], gh)
+
+    assert registry.claimed_by_others(999) == {}
+
+
+def test_rebuild_in_flight_registry_is_a_fresh_registry_each_call():
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    gh.commit_file(branch_name(1), design_doc_path(1), _VALID, message="design: #1")
+
+    first = rebuild_in_flight_registry([1], gh)
+    second = rebuild_in_flight_registry([], gh)
+
+    assert first.claimed_by_others(999) == {1: ["src/aorc/add.py"]}
+    assert second.claimed_by_others(999) == {}

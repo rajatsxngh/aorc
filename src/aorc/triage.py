@@ -33,8 +33,12 @@ class TriageResult:
     reason: str | None = None  # "vague" | "epic", set only when not-ready
 
 
-def _looks_like_epic(issue: Issue) -> bool:
-    """Mechanical epic hint: an `epic` label or a `- [ ]` task list body."""
+def looks_like_epic(issue: Issue) -> bool:
+    """Mechanical epic hint: an `epic` label or a `- [ ]` task list body.
+
+    Public (not triage-private) because S10's dispatch selector reuses it
+    to keep epics out of the build pipeline before decomposition (S12).
+    """
     return "epic" in issue.labels or bool(_TASK_LIST_RE.search(issue.body))
 
 
@@ -57,5 +61,5 @@ def triage(issue: Issue, llm: LLMClient) -> TriageResult:
     if completion.text.strip().lower().startswith("actionable"):
         return TriageResult("actionable")
 
-    reason = "epic" if _looks_like_epic(issue) else "vague"
+    reason = "epic" if looks_like_epic(issue) else "vague"
     return TriageResult("not-ready", reason)

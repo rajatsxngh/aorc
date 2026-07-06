@@ -51,6 +51,7 @@ class AorcConfig:
     merge_auto: bool = False
     primary_attempts: int = 3
     escalation_attempts: int = 1
+    dispatch_concurrency: int = 5
     raw: dict = field(default_factory=dict)
 
 
@@ -124,6 +125,10 @@ def parse_config(raw: dict) -> AorcConfig:
     if not isinstance(coverage, dict):
         raise ConfigError("`coverage` must be a mapping")
 
+    dispatch = raw.get("dispatch") or {}
+    if not isinstance(dispatch, dict):
+        raise ConfigError("`dispatch` must be a mapping")
+
     return AorcConfig(
         primary=primary,
         escalation=escalation,
@@ -136,5 +141,6 @@ def parse_config(raw: dict) -> AorcConfig:
         merge_auto=bool(merge.get("auto", False)),
         primary_attempts=int(failure.get("primary_attempts", 3)),
         escalation_attempts=int(failure.get("escalation_attempts", 1)),
+        dispatch_concurrency=int(dispatch.get("concurrency", 5)),
         raw=raw,
     )

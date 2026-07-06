@@ -1,5 +1,5 @@
 """S4 -- Container harness + checkpoint spine. S20 -- Checkpoint injection
-+ in-flight file-claim registry.
++ in-flight file-claim registry. S10 -- real collision verdict.
 
 The per-issue execution harness that S5-S8 run inside: one actionable issue,
 one isolated container, one git worktree. Nothing carries across issues.
@@ -11,13 +11,15 @@ dispatch (Docker/Actions) sits behind the `ContainerRuntime` seam, mirroring
 the `GitHubClient`/`LLMClient` pattern, so harness orchestration logic is
 testable without a real Docker daemon or Actions runner.
 
-`Checkpoint` is injected into `ContainerHarness` (default: a trivial one
-wired to the harness's own `GitHubClient`), and carries the collaborators
-real collision detection needs -- the `GitHubClient` (open PRs) and an
-`InFlightRegistry` of other in-flight issues' claimed file lists, recorded
-per-issue at the checkpoint and cleared on teardown. The verdict itself is
-still trivially "proceed" in this slice -- S10 fills in the real collision
-rule using these collaborators.
+`Checkpoint` is injected into `ContainerHarness` (default: wired to the
+harness's own `GitHubClient` and, if given, the same `GraphifyClient`), and
+carries the collaborators real collision detection needs -- the
+`GitHubClient` (open PRs), a `GraphifyClient` (import/call blast radius),
+and an `InFlightRegistry` of other in-flight issues' claimed file lists,
+recorded per-issue at the checkpoint and cleared on teardown. See
+`Checkpoint.verdict` for the real hold/proceed rule; `dispatch.py` covers the
+up-front selector (concurrency ceiling + declared blockers) that runs
+*before* a container ever starts.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+from .graphify import GraphifyClient
 from .interfaces import GitHubClient
 from .pipeline import branch_name
 
@@ -172,20 +175,66 @@ class InFlightRegistry:
 
 class Checkpoint:
     """Post-Design checkpoint: the container reports its exact file list and
-    waits for a verdict before continuing. Takes the collaborators real
-    collision detection needs -- the `GitHubClient` (open PRs) and the
-    in-flight file-claim registry -- but the verdict stays trivially
-    "proceed" here; S10 fills in the real collision rule."""
+    waits for a verdict before continuing.
+
+    S10's real collision rule: hold if the reported files exactly intersect
+    another in-flight issue's claim or an open, unmerged AORC PR's changed
+    files (the collision set), OR if Graphify says one side's files sit in
+    the other's import/call blast radius. A failed/uncertain Graphify query
+    is conservative -- it holds, it never silently proceeds. When no
+    `graphify` collaborator is configured, the check degrades to
+    path-intersect only (there is nothing to query).
+    """
 
     def __init__(
-        self, github: GitHubClient | None = None, registry: InFlightRegistry | None = None
+        self,
+        github: GitHubClient | None = None,
+        registry: InFlightRegistry | None = None,
+        graphify: GraphifyClient | None = None,
     ) -> None:
         self.github = github
         self.registry = registry if registry is not None else InFlightRegistry()
+        self.graphify = graphify
+
+    def _collision_set(self, report: CheckpointReport) -> set[str]:
+        """Every file claimed by someone other than this issue: other
+        in-flight containers' registered claims, plus open unmerged AORC
+        PRs' changed files (an open PR occupies its files just like a live
+        container -- two issues could otherwise pass clean and collide at
+        merge)."""
+        others: set[str] = set()
+        for files in self.registry.claimed_by_others(report.issue_number).values():
+            others.update(files)
+        if self.github is not None:
+            my_branch = branch_name(report.issue_number)
+            for pr in self.github.list_pull_requests(state="open"):
+                if pr.head == my_branch:
+                    continue
+                others.update(pr.files)
+        return others
+
+    def _collides(self, my_files: set[str], others: set[str]) -> bool:
+        if my_files & others:
+            return True
+        if not others:
+            return False  # nothing else in flight -- nothing to collide with
+        if self.graphify is None:
+            return False  # no blast-radius signal available; path-intersect only
+        forward = self.graphify.blast_radius(list(my_files))
+        if not forward.ok:
+            return True  # query failed/uncertain -> conservative hold
+        if forward.files & others:
+            return True
+        backward = self.graphify.blast_radius(list(others))
+        if not backward.ok:
+            return True
+        return bool(backward.files & my_files)
 
     def verdict(self, report: CheckpointReport) -> str:
+        others = self._collision_set(report)
+        collides = self._collides(set(report.files), others)
         self.registry.record(report.issue_number, report.files)
-        return "proceed"
+        return "hold" if collides else "proceed"
 
 
 def cleanup_branch(github: GitHubClient, issue_number: int, outcome: str) -> None:
@@ -208,11 +257,14 @@ class ContainerHarness:
         worktrees: WorktreeManager,
         github: GitHubClient,
         checkpoint: Checkpoint | None = None,
+        graphify: GraphifyClient | None = None,
     ) -> None:
         self._runtime = runtime
         self._worktrees = worktrees
         self._github = github
-        self._checkpoint = checkpoint if checkpoint is not None else Checkpoint(github=github)
+        self._checkpoint = (
+            checkpoint if checkpoint is not None else Checkpoint(github=github, graphify=graphify)
+        )
 
     def dispatch(self, issue_number: int) -> ContainerHandle:
         branch = branch_name(issue_number)
