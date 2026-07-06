@@ -14,6 +14,7 @@ from aorc.credentials import (
     TOKEN_TTL_SECONDS,
     CredentialBroker,
     CredentialLeakError,
+    PermissionCeilingError,
     ScrubbingGitHubClient,
     handle_token_expiry,
     scrub,
@@ -87,6 +88,29 @@ def test_mint_accepts_narrower_permissions():
     token = broker.mint(issue_number=5, repo="acme/widget", permissions={"issues": "read"})
 
     assert token.permissions == {"issues": "read"}
+
+
+def test_mint_rejects_permissions_outside_the_minimal_set():
+    minter = RecordingMinter()
+    broker = make_broker(minter)
+
+    with pytest.raises(PermissionCeilingError):
+        broker.mint(
+            issue_number=5, repo="acme/widget", permissions={"administration": "write"}
+        )
+    # rejected before the exchange -- no token was minted
+    assert minter.calls == []
+
+
+def test_mint_rejects_escalation_above_the_minimal_level():
+    minter = RecordingMinter()
+    broker = make_broker(minter)
+
+    with pytest.raises(PermissionCeilingError):
+        broker.mint(
+            issue_number=5, repo="acme/widget", permissions={"contents": "admin"}
+        )
+    assert minter.calls == []
 
 
 def test_token_expiry_boundary():

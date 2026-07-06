@@ -48,8 +48,12 @@ from .interfaces import Comment, GitHubClient, Issue, PullRequest
 TOKEN_TTL_SECONDS = 3600.0  # ~1 hour, per the credential model
 
 # The minimal per-issue permission set: enough to branch, commit, comment,
-# label, and open the PR -- nothing org- or admin-shaped.
+# label, and open the PR -- nothing org- or admin-shaped. Also the enforced
+# ceiling: `mint` rejects any request for a permission outside this set or at
+# a level above it.
 MINIMAL_PERMISSIONS = {"contents": "write", "issues": "write", "pull_requests": "write"}
+
+_PERMISSION_LEVELS = {"read": 0, "write": 1, "admin": 2}
 
 GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 LLM_API_KEY_ENV = "AORC_LLM_API_KEY"
@@ -71,6 +75,11 @@ SECRET_PATTERNS = (
 )
 
 _PRIVATE_KEY_BLOCK_RE = SECRET_PATTERNS[-1]
+
+
+class PermissionCeilingError(Exception):
+    """A mint request asked for permissions broader than the minimal per-issue
+    set. Raised instead of minting -- the ceiling is enforced, not advisory."""
 
 
 class CredentialLeakError(Exception):
@@ -117,8 +126,22 @@ class CredentialBroker:
         self, issue_number: int, repo: str, permissions: dict[str, str] | None = None
     ) -> IssueToken:
         """Mint one issue's token: single repo, minimal (or narrower)
-        permissions, expiring `token_ttl_seconds` from now."""
+        permissions, expiring `token_ttl_seconds` from now. A request broader
+        than `MINIMAL_PERMISSIONS` raises `PermissionCeilingError` before the
+        exchange -- the ceiling is enforced, never advisory."""
         perms = dict(permissions if permissions is not None else MINIMAL_PERMISSIONS)
+        for scope, level in perms.items():
+            ceiling = MINIMAL_PERMISSIONS.get(scope)
+            if ceiling is None:
+                raise PermissionCeilingError(
+                    f"permission scope {scope!r} is outside the minimal per-issue set"
+                )
+            if _PERMISSION_LEVELS.get(level, max(_PERMISSION_LEVELS.values())) > (
+                _PERMISSION_LEVELS[ceiling]
+            ):
+                raise PermissionCeilingError(
+                    f"permission {scope}:{level} exceeds the ceiling {scope}:{ceiling}"
+                )
         token = self._minter(self._private_key, repo, perms)
         return IssueToken(
             token=token,
