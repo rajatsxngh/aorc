@@ -25,6 +25,16 @@ The stateless-orchestrator guarantees that keep issues from starving and keep do
 - [ ] Artifact-presence check catches the pre-commit race (wasteful, not wrong)
 - [ ] Backfill/re-sync sweeps all open issues into triage; actionable dispatched 5 at a time
 
+### S15 wiring (credential model becomes a live property here, not a shelf library)
+
+- [ ] `CredentialBroker` is the **only** source of container env: `ContainerHarness.dispatch` must not accept hand-built env dicts — either take an `IssueToken`/broker-built env exclusively, or run every incoming env through the `container_env` leak check (`CredentialLeakError` on any key-shaped value) before it reaches the runtime
+- [ ] The wake loop calls `handle_token_expiry` for every in-flight container on every wake; `"re-queue"` feeds the held-issue re-dispatch path with a freshly minted token
+- [ ] **All** orchestrator-side GitHub writes go through `ScrubbingGitHubClient` — the composition root wraps the real client once, and no code path holds an unwrapped reference; extend scrubbing to label **names** (`add_label`/`set_labels`/`create_label`) and branch names (`open_pull_request` head, `commit_file` branch), which today pass through unscrubbed
+
+### Known limitation (deferred to S18/S19)
+
+- A container holding `GITHUB_TOKEN` can push or hit the API **directly**, bypassing the orchestrator-side scrubber entirely — layer 2 only covers orchestrator-mediated writes. Mitigate at S18/S19 (real container plumbing): route agent pushes through an orchestrator-mediated path or a scrubbing egress proxy, and stop passing secrets as `docker run -e KEY=value` (visible in host `ps`).
+
 ## Blocked by
 
 - S10 (held/blocked queue + dispatch)
