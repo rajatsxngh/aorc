@@ -1,69 +1,52 @@
 # ============================================================
 #  AORC base image
-#  A sealed room, pre-stocked with everything an agent needs.
-#  Every per-issue container (and your AFK Ralph sandbox) is
-#  born from this image, so the skills are ALWAYS present.
+#  Baked in: Claude Code + Matt's skills + Python 3.12 + uv + pytest
 # ============================================================
 
-# 1. Start from a ready-made Node.js machine.
-#    "node" already has Node + npm installed. "22-slim" = version 22,
-#    the "slim" (smaller) variant so the image isn't huge.
 FROM node:22-slim
 
-# 2. Install a few basic system tools the agents rely on:
-#    git (version control), ca-certificates (lets it talk to
-#    the internet securely), and curl (fetch things over the web).
-#    The "rm -rf" line at the end just deletes install leftovers
-#    to keep the image small.
+# 1. System tools + Python. (python3, pip, and venv come from apt here,
+#    so a working Python is ALWAYS present in every container — the agent
+#    never has to install it, and it never disappears between runs.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
     curl \
+    python3 \
+    python3-pip \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Make a non-root user called "agent" and work as them.
-#    Running as root (full admin) inside a container is risky;
-#    a normal user is a safer default. The agent lives in /home/agent.
+# 2. Install global node tools WHILE STILL ROOT.
+RUN npm install -g @anthropic-ai/claude-code
+RUN npx skills@latest add mattpocock/skills --yes --global
+
+# 3. Install uv (fast Python package manager) system-wide, still root.
+#    Placed in /usr/local/bin so every user (incl. 'agent') sees it on PATH.
+RUN curl -LsSf https://astral.sh/uv/install.sh | \
+    env UV_INSTALL_DIR=/usr/local/bin sh
+
+# 4. Make pytest available system-wide too, so the loop's test gate and
+#    manual `pytest` both work without a per-project venv.
+RUN pip install --no-cache-dir --break-system-packages pytest
+
+# 5. Create the non-root user and switch to it.
 RUN useradd --create-home --shell /bin/bash agent
 USER agent
 WORKDIR /home/agent
 
-# 4. Install Claude Code globally inside THIS image.
-#    (This is the container's own copy — nothing to do with the
-#    copy on your laptop. That's the whole point.)
-RUN npm install -g @anthropic-ai/claude-code
-
-# 5. Bake in Matt Pocock's skills, inside the image.
-#    Same install command you ran on your machine — but now it
-#    runs during the image build, so every container starts
-#    with /grill-me, /to-prd, /to-issues, /tdd, etc. already there.
-RUN npx skills@latest add mattpocock/skills --yes --global
-
-# 6. (Optional) A place for the repo to live when a container runs.
-#    When you start a container you'll drop the code into /work.
+# 6. Work directory for the mounted repo.
 WORKDIR /work
 
-# 7. Default command when a container starts.
-#    Left as bash so you can poke around; AORC / Ralph will
-#    override this to actually launch the agent.
+# 7. Default command.
 CMD ["/bin/bash"]
 
 # ------------------------------------------------------------
-#  NOTES (not run — just for you):
-#
-#  * The ANTHROPIC API KEY is deliberately NOT written in here.
-#    Never bake a secret into an image. You pass it in when you
-#    RUN a container, like this (one line in your terminal):
-#
-#      docker run -it \
-#        -e ANTHROPIC_API_KEY="sk-ant-...your-key..." \
-#        -v "$PWD":/work \
-#        aorc-base
-#
-#    -e  = hand it the key as an environment variable (safe, temporary)
-#    -v  = share your current folder into the container's /work
-#    aorc-base = the name we'll give this image (see build command below)
-#
-#  * This same image is what AORC's "pre-baked base image" decision
-#    in the PRD refers to. Build it once; reuse it for every issue.
+#  NOTES
+#  * Python, uv, and pytest are now part of the IMAGE, so they exist
+#    in every fresh container and survive the --rm teardown. The agent
+#    should NOT create its own uv-installed Python anymore.
+#  * Authentication inside the container still needs ANTHROPIC_API_KEY
+#    (passed at run time via --env-file .env). A host Max/Pro login
+#    does not carry into the container.
 # ------------------------------------------------------------
