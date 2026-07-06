@@ -138,7 +138,17 @@ class GitHubClient(ABC):
     def get_pull_request(self, number: int) -> PullRequest: ...
 
     @abstractmethod
+    def list_pull_requests(self, state: str = "open") -> list[PullRequest]: ...
+
+    @abstractmethod
     def merge_pull_request(self, number: int, method: str = "merge") -> None: ...
+
+    # ---- repo contents ----------------------------------------------------- #
+    # Used to check whether a stage's artifact (design doc, test file, ...) is
+    # actually committed to a branch -- the label alone is never sufficient.
+    @abstractmethod
+    def get_file(self, path: str, ref: str) -> str | None:
+        """Return the file's content at `path` on `ref`, or `None` if absent."""
 
     # ---- projects board -------------------------------------------------- #
     # The column is *derived* from the label by the state machine (S2); the

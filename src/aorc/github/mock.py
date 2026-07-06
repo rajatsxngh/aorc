@@ -21,6 +21,7 @@ class MockGitHubClient(GitHubClient):
         self.comments: dict[int, list[Comment]] = {}
         self.board: dict[int, str] = {}
         self.created_labels: dict[str, dict] = {}
+        self.files: dict[tuple[str, str], str] = {}  # (ref, path) -> content
         self.calls: list[tuple] = []
         self._next_comment_id = 1
         self._next_pr_number = max([p.number for p in self.pulls.values()], default=1000)
@@ -86,11 +87,22 @@ class MockGitHubClient(GitHubClient):
     def get_pull_request(self, number: int) -> PullRequest:
         return self.pulls[number]
 
+    def list_pull_requests(self, state: str = "open") -> list[PullRequest]:
+        return [p for p in self.pulls.values() if state == "all" or p.state == state]
+
     def merge_pull_request(self, number: int, method: str = "merge") -> None:
         self.calls.append(("merge_pull_request", number, method))
         pr = self.pulls[number]
         pr.merged = True
         pr.state = "closed"
+
+    # ---- repo contents ----------------------------------------------------- #
+    def get_file(self, path: str, ref: str) -> str | None:
+        return self.files.get((ref, path))
+
+    def add_file(self, ref: str, path: str, content: str) -> None:
+        """Test helper: simulate a file committed to `ref` at `path`."""
+        self.files[(ref, path)] = content
 
     # ---- projects board -------------------------------------------------- #
     def set_board_column(self, issue_number: int, column: str) -> None:

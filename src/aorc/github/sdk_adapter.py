@@ -107,8 +107,23 @@ class SdkGitHubClient(GitHubClient):
     def get_pull_request(self, number: int) -> PullRequest:
         return _to_pr(self._r().get_pull(number))
 
+    def list_pull_requests(self, state: str = "open") -> list[PullRequest]:
+        return [_to_pr(p) for p in self._r().get_pulls(state=state)]
+
     def merge_pull_request(self, number: int, method: str = "merge") -> None:
         self._r().get_pull(number).merge(merge_method=method)
+
+    # ---- repo contents ----------------------------------------------------- #
+    def get_file(self, path: str, ref: str) -> str | None:
+        from github import GithubException  # lazy: only when a real call is made
+
+        try:
+            content = self._r().get_contents(path, ref=ref)
+        except GithubException as e:
+            if e.status == 404:
+                return None
+            raise
+        return content.decoded_content.decode("utf-8")
 
     # ---- projects board -------------------------------------------------- #
     # Projects (v2) board updates go through the GraphQL API; wired up in S2
