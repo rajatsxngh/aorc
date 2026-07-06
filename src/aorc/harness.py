@@ -1,5 +1,6 @@
 """S4 -- Container harness + checkpoint spine. S20 -- Checkpoint injection
-+ in-flight file-claim registry. S10 -- real collision verdict.
++ in-flight file-claim registry. S10 -- real collision verdict. S13 --
+wall-clock compute guard wired into teardown.
 
 The per-issue execution harness that S5-S8 run inside: one actionable issue,
 one isolated container, one git worktree. Nothing carries across issues.
@@ -20,6 +21,14 @@ recorded per-issue at the checkpoint and cleared on teardown. See
 `Checkpoint.verdict` for the real hold/proceed rule; `dispatch.py` covers the
 up-front selector (concurrency ceiling + declared blockers) that runs
 *before* a container ever starts.
+
+`ContainerHarness.enforce_wall_clock` wires `guards.ComputeGuard`'s pure
+wall-clock decision into a real kill: label `agent-blocked`, ping, and
+teardown through the same branch-preserving path any other agent-blocked
+outcome uses. `guards.CostGuard` (the other half of S13, cost circuit
+breakers) is issue/run/day scoped rather than container scoped, so it isn't
+threaded through this class -- callers use it directly alongside whichever
+stage they're running.
 """
 
 from __future__ import annotations
@@ -31,8 +40,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from .graphify import GraphifyClient
+from .guards import BLOCKED_LABEL, TIMEOUT_PING_MARKER, ComputeGuard, ComputeVerdict
 from .interfaces import GitHubClient
-from .pipeline import branch_name
+from .pipeline import LABEL_COLUMN, branch_name
 
 # The three fixed branch-cleanup outcomes -- no agent judgment involved.
 _CLEANUP_OUTCOMES = {"merged", "agent-blocked", "held"}
@@ -272,6 +282,7 @@ class ContainerHarness:
         github: GitHubClient,
         checkpoint: Checkpoint | None = None,
         graphify: GraphifyClient | None = None,
+        compute_guard: ComputeGuard | None = None,
     ) -> None:
         self._runtime = runtime
         self._worktrees = worktrees
@@ -279,6 +290,7 @@ class ContainerHarness:
         self._checkpoint = (
             checkpoint if checkpoint is not None else Checkpoint(github=github, graphify=graphify)
         )
+        self._compute_guard = compute_guard if compute_guard is not None else ComputeGuard()
 
     def dispatch(self, issue_number: int) -> ContainerHandle:
         branch = branch_name(issue_number)
@@ -292,3 +304,22 @@ class ContainerHarness:
         self._runtime.teardown(handle)
         self._checkpoint.registry.clear(handle.issue_number)
         cleanup_branch(self._github, handle.issue_number, outcome)
+
+    def enforce_wall_clock(self, handle: ContainerHandle, elapsed_minutes: float) -> ComputeVerdict:
+        """S13 -- container compute limit. `elapsed_minutes` is caller-
+        supplied (see `ComputeGuard`). On a trip: label `agent-blocked`
+        (reason: wall-clock timeout), ping, and tear down through the same
+        teardown path a normal `agent-blocked` outcome uses -- branch kept,
+        resumable from the last committed artifact."""
+        verdict = self._compute_guard.check(elapsed_minutes)
+        if verdict.action == "kill":
+            self._github.add_label(handle.issue_number, BLOCKED_LABEL)
+            self._github.set_board_column(handle.issue_number, LABEL_COLUMN[BLOCKED_LABEL])
+            self._github.post_comment(
+                handle.issue_number,
+                f"{TIMEOUT_PING_MARKER}\nStopping: container wall-clock limit "
+                f"reached after {elapsed_minutes:.0f} min. Labeling "
+                f"`{BLOCKED_LABEL}` (reason: wall-clock timeout).",
+            )
+            self.teardown(handle, outcome="agent-blocked")
+        return verdict

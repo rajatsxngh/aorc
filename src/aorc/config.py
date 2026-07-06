@@ -54,6 +54,11 @@ class AorcConfig:
     dispatch_concurrency: int = 5
     clarification_nudge_days: float = 7.0
     clarification_block_days: float = 7.0
+    cost_per_issue_cap: float = 5.0
+    cost_per_run_cap: float = 50.0
+    cost_daily_cap: float = 100.0
+    cost_overshoot_multiplier: float = 1.5
+    compute_wall_clock_minutes: float = 45.0
     raw: dict = field(default_factory=dict)
 
 
@@ -146,6 +151,24 @@ def parse_config(raw: dict) -> AorcConfig:
     if not isinstance(clarification, dict):
         raise ConfigError("`clarification` must be a mapping")
 
+    cost = raw.get("cost") or {}
+    if not isinstance(cost, dict):
+        raise ConfigError("`cost` must be a mapping")
+
+    compute = raw.get("compute") or {}
+    if not isinstance(compute, dict):
+        raise ConfigError("`compute` must be a mapping")
+
+    # S13: never opt into a larger-than-default GitHub runner. The only
+    # valid value for `runner`, if present at all, is "default" -- fail
+    # closed on anything else rather than silently ignoring the opt-in.
+    runner = raw.get("runner")
+    if runner is not None and str(runner).strip().lower() != "default":
+        raise ConfigError(
+            f"runner must be 'default' (or omitted); got {runner!r} -- "
+            "AORC never opts into a larger-than-default runner"
+        )
+
     return AorcConfig(
         primary=primary,
         escalation=escalation,
@@ -161,5 +184,10 @@ def parse_config(raw: dict) -> AorcConfig:
         dispatch_concurrency=int(dispatch.get("concurrency", 5)),
         clarification_nudge_days=_parse_window(clarification.get("nudge_days"), 7.0),
         clarification_block_days=_parse_window(clarification.get("block_days"), 7.0),
+        cost_per_issue_cap=float(cost.get("per_issue_cap", 5.0)),
+        cost_per_run_cap=float(cost.get("per_run_cap", 50.0)),
+        cost_daily_cap=float(cost.get("daily_cap", 100.0)),
+        cost_overshoot_multiplier=float(cost.get("overshoot_multiplier", 1.5)),
+        compute_wall_clock_minutes=float(compute.get("wall_clock_minutes", 45.0)),
         raw=raw,
     )

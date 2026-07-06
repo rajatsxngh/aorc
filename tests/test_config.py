@@ -136,6 +136,49 @@ def test_missing_llm_primary_fails_closed(tmp_path):
         load_config(_write(tmp_path, "setup: x\ntest: y\n"))
 
 
+def test_cost_and_compute_caps_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    cfg = load_config(_write(tmp_path, SAMPLE.format(primary_model="a", esc_model="b")))
+    assert cfg.cost_per_issue_cap == 5.0
+    assert cfg.cost_per_run_cap == 50.0
+    assert cfg.cost_daily_cap == 100.0
+    assert cfg.cost_overshoot_multiplier == 1.5
+    assert cfg.compute_wall_clock_minutes == 45.0
+
+
+def test_cost_and_compute_caps_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    with_caps = SAMPLE.format(primary_model="a", esc_model="b") + (
+        "cost:\n"
+        "  per_issue_cap: 3\n"
+        "  per_run_cap: 40\n"
+        "  daily_cap: 80\n"
+        "  overshoot_multiplier: 2\n"
+        "compute:\n"
+        "  wall_clock_minutes: 30\n"
+    )
+    cfg = load_config(_write(tmp_path, with_caps))
+    assert cfg.cost_per_issue_cap == 3.0
+    assert cfg.cost_per_run_cap == 40.0
+    assert cfg.cost_daily_cap == 80.0
+    assert cfg.cost_overshoot_multiplier == 2.0
+    assert cfg.compute_wall_clock_minutes == 30.0
+
+
+def test_runner_field_rejects_non_default_opt_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    with_runner = SAMPLE.format(primary_model="a", esc_model="b") + "runner: large\n"
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, with_runner))
+
+
+def test_runner_field_accepts_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    with_runner = SAMPLE.format(primary_model="a", esc_model="b") + "runner: default\n"
+    cfg = load_config(_write(tmp_path, with_runner))
+    assert cfg.cost_per_issue_cap == 5.0
+
+
 def test_no_model_names_hardcoded_in_source():
     """Architecture invariant #2 — model names live in config, not code."""
     import pathlib

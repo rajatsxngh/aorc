@@ -8,6 +8,7 @@ import pytest
 
 from aorc.github.mock import MockGitHubClient
 from aorc.graphify import MockGraphifyClient
+from aorc.guards import ComputeGuard
 from aorc.harness import (
     Checkpoint,
     CheckpointReport,
@@ -225,6 +226,52 @@ def test_harness_teardown_clears_the_issues_checkpoint_claim(tmp_path):
 
     harness.teardown(handle, outcome="held")
 
+    assert registry.claimed_by_others(999) == {}
+
+
+def test_enforce_wall_clock_continues_under_limit(tmp_path):
+    repo = _init_repo(tmp_path)
+    worktrees = WorktreeManager(str(repo), str(tmp_path / "worktrees"))
+    runtime = MockContainerRuntime()
+    gh = MockGitHubClient(issues=[Issue(number=5)])
+    harness = ContainerHarness(
+        runtime, worktrees, gh, compute_guard=ComputeGuard(wall_clock_minutes=30.0)
+    )
+    handle = harness.dispatch(5)
+
+    verdict = harness.enforce_wall_clock(handle, elapsed_minutes=10.0)
+
+    assert verdict.action == "continue"
+    assert handle.status == "running"
+    assert gh.issues[5].labels == []
+
+
+def test_enforce_wall_clock_kills_labels_and_preserves_branch(tmp_path):
+    repo = _init_repo(tmp_path)
+    worktrees = WorktreeManager(str(repo), str(tmp_path / "worktrees"))
+    runtime = MockContainerRuntime()
+    gh = MockGitHubClient(issues=[Issue(number=5)])
+    registry = InFlightRegistry()
+    checkpoint = Checkpoint(github=gh, registry=registry)
+    harness = ContainerHarness(
+        runtime,
+        worktrees,
+        gh,
+        checkpoint=checkpoint,
+        compute_guard=ComputeGuard(wall_clock_minutes=30.0),
+    )
+    handle = harness.dispatch(5)
+    harness.checkpoint(CheckpointReport(issue_number=5, files=["a.py"]))
+
+    verdict = harness.enforce_wall_clock(handle, elapsed_minutes=30.0)
+
+    assert verdict.action == "kill"
+    assert handle.status == "stopped"
+    assert "agent-blocked" in gh.issues[5].labels
+    assert any("wall-clock" in c.body.lower() for c in gh.list_comments(5))
+    # branch preserved (kept, like any other agent-blocked outcome)
+    assert ("delete_branch", branch_name(5)) not in gh.calls
+    # checkpoint claim cleared, same as a normal teardown
     assert registry.claimed_by_others(999) == {}
 
 
