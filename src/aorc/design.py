@@ -1,0 +1,153 @@
+"""S5 -- Design stage: strict schema + actionability gate.
+
+The first pipeline stage inside the container. A design agent reads the
+issue (+ clarification Q&A + relevant repo files -- fresh, scoped context,
+nothing carried over from other stages) and must emit a design doc in a
+strict, machine-readable (JSON) schema -- not freeform -- so the tester and
+coder consume it identically every run.
+
+Design *is* the actionability gate: it either bounds the work (proceed) or
+it can't (needs-clarification / agent-blocked). Routing on an invalid
+response is a pure, mechanical schema check -- no LLM judgment:
+  - fails to parse / missing required fields (a *format* miss) -> retry the
+    design agent, then agent-blocked if still unparseable after N attempts.
+  - parses with all required fields but low `confidence` -> needs-clarification
+    (the gate working as intended, not a format problem).
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+
+from .harness import CheckpointReport
+from .interfaces import GitHubClient, LLMClient, Message
+from .pipeline import branch_name
+
+REQUIRED_FIELDS = ("interface", "test_specs", "task_list", "files", "confidence")
+
+DEFAULT_CONFIDENCE_THRESHOLD = 0.5
+DEFAULT_MAX_RETRIES = 3
+
+_SYSTEM_PROMPT = (
+    "You are the design agent for a software issue. Produce a design doc as a "
+    "single JSON object with exactly these fields:\n"
+    '  "interface": [{"name": ..., "inputs": [...], "outputs": ...}, ...]\n'
+    '  "test_specs": [ "behavior to test", ... ]\n'
+    '  "task_list": [ "ordered implementation step", ... ]\n'
+    '  "files": [ "exact/file/path.py", ... ]\n'
+    '  "confidence": 0.0-1.0\n'
+    "If the issue cannot be bounded into a finite interface, test list, and task "
+    "list, still reply with the JSON schema but set confidence low. Reply with "
+    "the JSON object only, no surrounding prose."
+)
+
+
+def design_doc_path(issue_number: int) -> str:
+    return f"aorc/issue-{issue_number}/design.md"
+
+
+@dataclass
+class DesignDoc:
+    interface: list
+    test_specs: list
+    task_list: list
+    files: list
+    confidence: float
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class DesignResult:
+    status: str  # "proceed" | "needs-clarification" | "agent-blocked"
+    doc: DesignDoc | None = None
+    attempts: int = 0
+
+
+def parse_design_response(text: str) -> DesignDoc | None:
+    """Pure schema check, no LLM judgment: `None` on any format miss (invalid
+    JSON, not an object, or missing a required field)."""
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict) or any(f not in data for f in REQUIRED_FIELDS):
+        return None
+    try:
+        confidence = float(data["confidence"])
+    except (TypeError, ValueError):
+        return None
+    return DesignDoc(
+        interface=data["interface"],
+        test_specs=data["test_specs"],
+        task_list=data["task_list"],
+        files=data["files"],
+        confidence=confidence,
+        raw=data,
+    )
+
+
+def checkpoint_report(issue_number: int, doc: DesignDoc) -> CheckpointReport:
+    """The design doc's `files` field feeds the S4 checkpoint report."""
+    return CheckpointReport(issue_number=issue_number, files=list(doc.files))
+
+
+class DesignStage:
+    """Runs the design agent on fresh, scoped context; validates the strict
+    schema mechanically; commits the design doc to the issue's branch when it
+    bounds the work."""
+
+    def __init__(
+        self,
+        llm: LLMClient,
+        github: GitHubClient,
+        *,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+    ) -> None:
+        self._llm = llm
+        self._github = github
+        self._max_retries = max_retries
+        self._confidence_threshold = confidence_threshold
+
+    def _messages(self, issue_number: int, issue_body: str, qa: list[str], repo_files: dict[str, str]) -> list[Message]:
+        # Scoped context only: this issue's body, its Q&A, and the requested
+        # repo files -- nothing from other stages or other issues.
+        parts = [f"Issue #{issue_number}:\n{issue_body}"]
+        if qa:
+            parts.append("Clarification Q&A:\n" + "\n".join(qa))
+        for path, content in repo_files.items():
+            parts.append(f"Repo file {path}:\n{content}")
+        return [
+            Message("system", _SYSTEM_PROMPT),
+            Message("user", "\n\n".join(parts)),
+        ]
+
+    def run(
+        self,
+        issue_number: int,
+        issue_body: str,
+        *,
+        qa: list[str] | None = None,
+        repo_files: dict[str, str] | None = None,
+    ) -> DesignResult:
+        messages = self._messages(issue_number, issue_body, qa or [], repo_files or {})
+        attempts = 0
+        for attempts in range(1, self._max_retries + 1):
+            completion = self._llm.complete(messages)
+            doc = parse_design_response(completion.text)
+            if doc is None:
+                continue  # format miss -- retry the design agent
+            if doc.confidence < self._confidence_threshold:
+                return DesignResult(status="needs-clarification", doc=doc, attempts=attempts)
+            self._commit(issue_number, doc)
+            return DesignResult(status="proceed", doc=doc, attempts=attempts)
+        return DesignResult(status="agent-blocked", doc=None, attempts=attempts)
+
+    def _commit(self, issue_number: int, doc: DesignDoc) -> None:
+        self._github.commit_file(
+            branch_name(issue_number),
+            design_doc_path(issue_number),
+            json.dumps(doc.raw, indent=2),
+            message=f"design: issue #{issue_number}",
+        )

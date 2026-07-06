@@ -212,6 +212,18 @@ class SdkGitHubClient(GitHubClient):
             raise
         return content.decoded_content.decode("utf-8")
 
+    def commit_file(self, branch: str, path: str, content: str, message: str) -> None:
+        from github import GithubException  # lazy: only when a real call is made
+
+        try:
+            existing = self._r().get_contents(path, ref=branch)
+        except GithubException as e:
+            if e.status != 404:
+                raise
+            self._r().create_file(path, message, content, branch=branch)
+            return
+        self._r().update_file(path, message, content, existing.sha, branch=branch)
+
     # ---- projects board -------------------------------------------------- #
     # The column is a *derived, display-only* projection of the label (S2); the
     # label is the source of truth. If no Projects v2 board is configured on this

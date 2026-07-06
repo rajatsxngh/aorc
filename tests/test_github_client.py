@@ -67,3 +67,13 @@ def test_close_issue():
     gh = MockGitHubClient(issues=[Issue(number=1)])
     gh.close_issue(1)
     assert gh.get_issue(1).state == "closed"
+
+
+def test_commit_file_then_readable_via_get_file():
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    assert gh.get_file("aorc/issue-1/design.md", "aorc/issue-1") is None
+
+    gh.commit_file("aorc/issue-1", "aorc/issue-1/design.md", "content", message="design: #1")
+
+    assert gh.get_file("aorc/issue-1/design.md", "aorc/issue-1") == "content"
+    assert ("commit_file", "aorc/issue-1", "aorc/issue-1/design.md", "design: #1") in gh.calls

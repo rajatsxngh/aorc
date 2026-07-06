@@ -156,6 +156,12 @@ class GitHubClient(ABC):
     def get_file(self, path: str, ref: str) -> str | None:
         """Return the file's content at `path` on `ref`, or `None` if absent."""
 
+    @abstractmethod
+    def commit_file(self, branch: str, path: str, content: str, message: str) -> None:
+        """Create or update `path` on `branch` with `content`. How a stage
+        (e.g. S5's design doc) persists its artifact as the resumable record
+        `get_file` later checks for."""
+
     # ---- projects board -------------------------------------------------- #
     # The column is *derived* from the label by the state machine (S2); the
     # client only exposes the raw set/get so agents never compute it inline.

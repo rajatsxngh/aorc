@@ -113,6 +113,10 @@ class MockGitHubClient(GitHubClient):
     def get_file(self, path: str, ref: str) -> str | None:
         return self.files.get((ref, path))
 
+    def commit_file(self, branch: str, path: str, content: str, message: str) -> None:
+        self.calls.append(("commit_file", branch, path, message))
+        self.files[(branch, path)] = content
+
     def add_file(self, ref: str, path: str, content: str) -> None:
         """Test helper: simulate a file committed to `ref` at `path`."""
         self.files[(ref, path)] = content
