@@ -36,5 +36,9 @@ class MockLLMClient(LLMClient):
         temperature: float = 0.0,
     ) -> Completion:
         self.calls.append((messages, {"max_tokens": max_tokens, "temperature": temperature}))
-        text = self._responses.pop(0) if self._responses else self._default
-        return Completion(text=text, model=self._model, finish_reason="stop")
+        next_response = self._responses.pop(0) if self._responses else self._default
+        if isinstance(next_response, BaseException):
+            # Scripted provider failure (e.g. `ProviderError`) -- lets tests
+            # exercise the backoff/retry path without a real adapter.
+            raise next_response
+        return Completion(text=next_response, model=self._model, finish_reason="stop")

@@ -1,0 +1,232 @@
+"""S7 -- Coder bounded fix loop."""
+
+from __future__ import annotations
+
+import json
+
+from aorc.coder import (
+    CoderStage as Stage,
+    ProviderError,
+    failing_test_summary,
+    parse_coder_response,
+)
+from aorc.design import DesignDoc
+from aorc.github.mock import MockGitHubClient
+from aorc.interfaces import Issue
+from aorc.llm.mock import MockLLMClient
+from aorc.pipeline import branch_name
+from aorc.tester import MockTestRunner, TestRunResult as RunResult, generated_test_path
+
+_DESIGN = DesignDoc(
+    interface=[{"name": "add", "inputs": ["a", "b"], "outputs": "int"}],
+    test_specs=["add(1, 2) == 3"],
+    task_list=["implement add()"],
+    files=["src/aorc/add.py"],
+    confidence=0.9,
+)
+
+_ONE_TASK = json.dumps(
+    {"tasks": [{"task": "implement add()", "path": "src/aorc/add.py", "code": "def add(a, b):\n    return a + b\n"}]}
+)
+_OUT_OF_SCOPE = json.dumps(
+    {"tasks": [{"task": "implement add()", "path": "src/aorc/other.py", "code": "x = 1\n"}]}
+)
+
+
+def _stage(responses, test_results=None, **kwargs):
+    llm = MockLLMClient(responses=responses)
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    runner = MockTestRunner(results=test_results)
+    stage = Stage(llm, gh, runner, **kwargs)
+    return stage, llm, gh, runner
+
+
+# ---- pure parsing/formatting functions ----------------------------------- #
+
+
+def test_parse_coder_response_valid():
+    doc = parse_coder_response(_ONE_TASK, _DESIGN.task_list, _DESIGN.files)
+    assert doc is not None
+    assert doc.tasks[0]["path"] == "src/aorc/add.py"
+
+
+def test_parse_coder_response_path_outside_files_is_format_miss():
+    assert parse_coder_response(_OUT_OF_SCOPE, _DESIGN.task_list, _DESIGN.files) is None
+
+
+def test_parse_coder_response_count_mismatch_is_format_miss():
+    two = json.dumps(
+        {
+            "tasks": [
+                {"task": "a", "path": "src/aorc/add.py", "code": "x"},
+                {"task": "b", "path": "src/aorc/add.py", "code": "y"},
+            ]
+        }
+    )
+    assert parse_coder_response(two, _DESIGN.task_list, _DESIGN.files) is None
+
+
+def test_parse_coder_response_invalid_json_is_format_miss():
+    assert parse_coder_response("not json", _DESIGN.task_list, _DESIGN.files) is None
+
+
+def test_parse_coder_response_empty_code_is_format_miss():
+    bad = json.dumps({"tasks": [{"task": "implement add()", "path": "src/aorc/add.py", "code": ""}]})
+    assert parse_coder_response(bad, _DESIGN.task_list, _DESIGN.files) is None
+
+
+def test_failing_test_summary_has_no_test_source_markers():
+    summary = failing_test_summary(RunResult(returncode=1, stdout="AssertionError: assert 4 == 3"))
+    assert "result: fail" in summary
+    assert "AssertionError" in summary
+
+
+# ---- CoderStage end-to-end ------------------------------------------------ #
+
+
+def test_happy_path_proceeds_and_commits_code():
+    stage, llm, gh, runner = _stage([_ONE_TASK], test_results=[RunResult(returncode=0)])
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "proceed"
+    assert result.attempts == 1
+    committed = gh.get_file("src/aorc/add.py", branch_name(1))
+    assert committed is not None and "return a + b" in committed
+
+
+def test_executes_task_list_in_order():
+    two_task_design = DesignDoc(
+        interface=_DESIGN.interface,
+        test_specs=_DESIGN.test_specs,
+        task_list=["first task", "second task"],
+        files=["a.py", "b.py"],
+        confidence=0.9,
+    )
+    response = json.dumps(
+        {
+            "tasks": [
+                {"task": "first task", "path": "a.py", "code": "a = 1\n"},
+                {"task": "second task", "path": "b.py", "code": "b = 2\n"},
+            ]
+        }
+    )
+    stage, llm, gh, runner = _stage([response], test_results=[RunResult(returncode=0)])
+
+    result = stage.run(1, two_task_design)
+
+    assert result.status == "proceed"
+    commit_paths = [call[2] for call in gh.calls if call[0] == "commit_file"]
+    assert commit_paths == ["a.py", "b.py"]
+
+
+def test_coder_never_receives_test_source():
+    stage, llm, gh, runner = _stage([_ONE_TASK], test_results=[RunResult(returncode=0)])
+
+    stage.run(
+        1,
+        _DESIGN,
+        repo_files={generated_test_path(1): "def test_add():\n    assert add(1, 2) == 3\n"},
+    )
+
+    sent = "\n".join(m.content for m in llm.calls[0][0])
+    assert "def test_add" not in sent
+
+
+def test_coder_receives_only_pass_fail_and_errors_on_retry():
+    stage, llm, gh, runner = _stage(
+        [_OUT_OF_SCOPE, _ONE_TASK],
+        test_results=[RunResult(returncode=0)],
+    )
+
+    stage.run(1, _DESIGN)
+
+    second_call_text = "\n".join(m.content for m in llm.calls[1][0])
+    assert "format miss" in second_call_text
+
+
+def test_runs_setup_test_and_lint_in_order():
+    stage, llm, gh, runner = _stage(
+        [_ONE_TASK],
+        test_results=[RunResult(returncode=0), RunResult(returncode=0), RunResult(returncode=0)],
+        setup_command="pip install -e .",
+        test_command="pytest -q",
+        lint_command="ruff check .",
+    )
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "proceed"
+    assert runner.calls == [(".", "pip install -e ."), (".", "pytest -q"), (".", "ruff check .")]
+
+
+def test_lint_failure_retries_the_loop():
+    stage, llm, gh, runner = _stage(
+        [_ONE_TASK, _ONE_TASK],
+        test_results=[
+            RunResult(returncode=0),  # test passes
+            RunResult(returncode=1, stdout="lint error"),  # lint fails
+            RunResult(returncode=0),  # retry: test passes
+            RunResult(returncode=0),  # retry: lint passes
+        ],
+        lint_command="ruff check .",
+    )
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "proceed"
+    assert result.attempts == 2
+
+
+def test_red_result_retries_then_agent_blocked():
+    stage, llm, gh, runner = _stage(
+        [_ONE_TASK, _ONE_TASK],
+        test_results=[
+            RunResult(returncode=1, stdout="AssertionError: assert 4 == 3"),
+            RunResult(returncode=1, stdout="AssertionError: assert 4 == 3"),
+        ],
+        max_retries=2,
+    )
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert result.attempts == 2
+
+
+def test_format_miss_retries_then_agent_blocked():
+    stage, llm, gh, runner = _stage(["garbage", "garbage", "garbage"], max_retries=3)
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert result.attempts == 3
+    assert len(runner.calls) == 0  # never got past the schema gate
+
+
+def test_provider_error_does_not_consume_attempt_counter():
+    stage, llm, gh, runner = _stage(
+        [ProviderError("connection reset"), _ONE_TASK],
+        test_results=[RunResult(returncode=0)],
+        max_retries=1,
+    )
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "proceed"
+    assert result.attempts == 1
+    assert len(llm.calls) == 2
+
+
+def test_provider_error_exhausts_to_agent_blocked_without_touching_real_ladder():
+    stage, llm, gh, runner = _stage(
+        [ProviderError("boom")] * 5,
+        max_retries=3,
+        max_provider_retries=2,
+    )
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert result.attempts == 0  # no real (non-provider) attempt ever ran
+    assert len(runner.calls) == 0
