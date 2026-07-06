@@ -89,6 +89,30 @@ def test_dispatch_concurrency_defaults_and_configured(tmp_path, monkeypatch):
     assert cfg.dispatch_concurrency == 8
 
 
+def test_clarification_windows_default_and_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    cfg = load_config(_write(tmp_path, SAMPLE.format(primary_model="a", esc_model="b")))
+    assert cfg.clarification_nudge_days == 7.0
+    assert cfg.clarification_block_days == 7.0
+
+    with_clarification = SAMPLE.format(primary_model="a", esc_model="b") + (
+        "clarification:\n  nudge_days: 3\n  block_days: 10\n"
+    )
+    cfg = load_config(_write(tmp_path, with_clarification))
+    assert cfg.clarification_nudge_days == 3.0
+    assert cfg.clarification_block_days == 10.0
+
+
+def test_clarification_windows_infinity(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    with_infinity = SAMPLE.format(primary_model="a", esc_model="b") + (
+        "clarification:\n  nudge_days: infinity\n  block_days: infinity\n"
+    )
+    cfg = load_config(_write(tmp_path, with_infinity))
+    assert cfg.clarification_nudge_days == float("inf")
+    assert cfg.clarification_block_days == float("inf")
+
+
 def test_local_base_url_slot(tmp_path):
     text = """\
 llm:

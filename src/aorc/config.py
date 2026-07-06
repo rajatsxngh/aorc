@@ -52,6 +52,8 @@ class AorcConfig:
     primary_attempts: int = 3
     escalation_attempts: int = 1
     dispatch_concurrency: int = 5
+    clarification_nudge_days: float = 7.0
+    clarification_block_days: float = 7.0
     raw: dict = field(default_factory=dict)
 
 
@@ -69,6 +71,17 @@ def _expand(value: Any) -> Any:
     if _ENV_RE.search(value):
         return _ENV_RE.sub(repl, value)
     return value
+
+
+def _parse_window(value: Any, default: float) -> float:
+    """A clarification timeout window in days. Accepts a number, or the
+    string 'infinity'/'inf' (YAML's `.inf` tag already parses as a float) to
+    restore wait-forever behavior."""
+    if value is None:
+        return default
+    if isinstance(value, str) and value.strip().lower() in ("infinity", "inf"):
+        return float("inf")
+    return float(value)
 
 
 def _parse_slot(data: Any, where: str) -> ModelSlot:
@@ -129,6 +142,10 @@ def parse_config(raw: dict) -> AorcConfig:
     if not isinstance(dispatch, dict):
         raise ConfigError("`dispatch` must be a mapping")
 
+    clarification = raw.get("clarification") or {}
+    if not isinstance(clarification, dict):
+        raise ConfigError("`clarification` must be a mapping")
+
     return AorcConfig(
         primary=primary,
         escalation=escalation,
@@ -142,5 +159,7 @@ def parse_config(raw: dict) -> AorcConfig:
         primary_attempts=int(failure.get("primary_attempts", 3)),
         escalation_attempts=int(failure.get("escalation_attempts", 1)),
         dispatch_concurrency=int(dispatch.get("concurrency", 5)),
+        clarification_nudge_days=_parse_window(clarification.get("nudge_days"), 7.0),
+        clarification_block_days=_parse_window(clarification.get("block_days"), 7.0),
         raw=raw,
     )
