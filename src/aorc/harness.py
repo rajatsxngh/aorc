@@ -1,4 +1,5 @@
-"""S4 -- Container harness + checkpoint spine.
+"""S4 -- Container harness + checkpoint spine. S20 -- Checkpoint injection
++ in-flight file-claim registry.
 
 The per-issue execution harness that S5-S8 run inside: one actionable issue,
 one isolated container, one git worktree. Nothing carries across issues.
@@ -10,8 +11,13 @@ dispatch (Docker/Actions) sits behind the `ContainerRuntime` seam, mirroring
 the `GitHubClient`/`LLMClient` pattern, so harness orchestration logic is
 testable without a real Docker daemon or Actions runner.
 
-The checkpoint verdict is trivially "proceed" in this slice -- real
-collision logic against other in-flight issues and open PRs arrives in S10.
+`Checkpoint` is injected into `ContainerHarness` (default: a trivial one
+wired to the harness's own `GitHubClient`), and carries the collaborators
+real collision detection needs -- the `GitHubClient` (open PRs) and an
+`InFlightRegistry` of other in-flight issues' claimed file lists, recorded
+per-issue at the checkpoint and cleared on teardown. The verdict itself is
+still trivially "proceed" in this slice -- S10 fills in the real collision
+rule using these collaborators.
 """
 
 from __future__ import annotations
@@ -145,12 +151,40 @@ class WorktreeManager:
         return path
 
 
+class InFlightRegistry:
+    """Tracks each dispatched issue's claimed file list as reported at its
+    checkpoint, so collision logic can ask "what files are claimed by
+    in-flight issues other than mine". An issue's claim is cleared on
+    teardown -- nothing outlives the issue it belongs to."""
+
+    def __init__(self) -> None:
+        self._claims: dict[int, list[str]] = {}
+
+    def record(self, issue_number: int, files: list[str]) -> None:
+        self._claims[issue_number] = list(files)
+
+    def claimed_by_others(self, issue_number: int) -> dict[int, list[str]]:
+        return {n: files for n, files in self._claims.items() if n != issue_number}
+
+    def clear(self, issue_number: int) -> None:
+        self._claims.pop(issue_number, None)
+
+
 class Checkpoint:
     """Post-Design checkpoint: the container reports its exact file list and
-    waits for a verdict before continuing. Trivially "proceed" here -- only
-    one issue is ever in flight; real collision detection arrives in S10."""
+    waits for a verdict before continuing. Takes the collaborators real
+    collision detection needs -- the `GitHubClient` (open PRs) and the
+    in-flight file-claim registry -- but the verdict stays trivially
+    "proceed" here; S10 fills in the real collision rule."""
+
+    def __init__(
+        self, github: GitHubClient | None = None, registry: InFlightRegistry | None = None
+    ) -> None:
+        self.github = github
+        self.registry = registry if registry is not None else InFlightRegistry()
 
     def verdict(self, report: CheckpointReport) -> str:
+        self.registry.record(report.issue_number, report.files)
         return "proceed"
 
 
@@ -169,12 +203,16 @@ class ContainerHarness:
     carries across issues."""
 
     def __init__(
-        self, runtime: ContainerRuntime, worktrees: WorktreeManager, github: GitHubClient
+        self,
+        runtime: ContainerRuntime,
+        worktrees: WorktreeManager,
+        github: GitHubClient,
+        checkpoint: Checkpoint | None = None,
     ) -> None:
         self._runtime = runtime
         self._worktrees = worktrees
         self._github = github
-        self._checkpoint = Checkpoint()
+        self._checkpoint = checkpoint if checkpoint is not None else Checkpoint(github=github)
 
     def dispatch(self, issue_number: int) -> ContainerHandle:
         branch = branch_name(issue_number)
@@ -186,4 +224,5 @@ class ContainerHarness:
 
     def teardown(self, handle: ContainerHandle, outcome: str) -> None:
         self._runtime.teardown(handle)
+        self._checkpoint.registry.clear(handle.issue_number)
         cleanup_branch(self._github, handle.issue_number, outcome)
