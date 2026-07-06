@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from .graphify import GraphifyClient
 from .harness import CheckpointReport
 from .interfaces import GitHubClient, LLMClient, Message
 from .pipeline import branch_name
@@ -104,11 +105,13 @@ class DesignStage:
         *,
         max_retries: int = DEFAULT_MAX_RETRIES,
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+        graphify: GraphifyClient | None = None,
     ) -> None:
         self._llm = llm
         self._github = github
         self._max_retries = max_retries
         self._confidence_threshold = confidence_threshold
+        self._graphify = graphify
 
     def _messages(self, issue_number: int, issue_body: str, qa: list[str], repo_files: dict[str, str]) -> list[Message]:
         # Scoped context only: this issue's body, its Q&A, and the requested
@@ -118,6 +121,13 @@ class DesignStage:
             parts.append("Clarification Q&A:\n" + "\n".join(qa))
         for path, content in repo_files.items():
             parts.append(f"Repo file {path}:\n{content}")
+        if self._graphify is not None and repo_files:
+            result = self._graphify.blast_radius(list(repo_files))
+            if result.ok:
+                blast = ", ".join(sorted(result.files)) or "none"
+                parts.append(f"Blast radius (files that import/call the above): {blast}")
+            else:
+                parts.append(f"Blast radius query failed ({result.error}); proceed without it.")
         return [
             Message("system", _SYSTEM_PROMPT),
             Message("user", "\n\n".join(parts)),

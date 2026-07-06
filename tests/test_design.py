@@ -124,6 +124,44 @@ def test_scoped_context_only_no_cross_stage_leakage():
     assert "def foo(): pass" in sent_text
 
 
+def test_no_graphify_client_leaves_prompt_unchanged():
+    stage, llm, gh = _stage([_VALID])
+
+    stage.run(1, "the issue body", repo_files={"src/aorc/foo.py": "def foo(): pass"})
+
+    sent_messages, _kwargs = llm.calls[0]
+    sent_text = "\n".join(m.content for m in sent_messages)
+    assert "Blast radius" not in sent_text
+
+
+def test_graphify_blast_radius_included_in_design_prompt():
+    from aorc.graphify import MockGraphifyClient
+
+    graphify = MockGraphifyClient(edges={"src/aorc/foo.py": {"src/aorc/bar.py"}})
+    stage, llm, gh = _stage([_VALID], graphify=graphify)
+
+    stage.run(1, "the issue body", repo_files={"src/aorc/foo.py": "def foo(): pass"})
+
+    sent_messages, _kwargs = llm.calls[0]
+    sent_text = "\n".join(m.content for m in sent_messages)
+    assert "src/aorc/bar.py" in sent_text
+
+
+def test_graphify_query_failure_noted_but_does_not_block_design():
+    from aorc.graphify import MockGraphifyClient
+
+    graphify = MockGraphifyClient()
+    graphify.fail_next = True
+    stage, llm, gh = _stage([_VALID], graphify=graphify)
+
+    result = stage.run(1, "the issue body", repo_files={"src/aorc/foo.py": "def foo(): pass"})
+
+    assert result.status == "proceed"
+    sent_messages, _kwargs = llm.calls[0]
+    sent_text = "\n".join(m.content for m in sent_messages)
+    assert "Blast radius query failed" in sent_text
+
+
 def test_checkpoint_report_carries_files_from_design_doc():
     doc = parse_design_response(_VALID)
 

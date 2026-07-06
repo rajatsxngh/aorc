@@ -9,7 +9,7 @@ an SDK is a violation. Enforced statically over the AST so it can't regress.
 import ast
 import pathlib
 
-SDK_MODULES = {"anthropic", "openai", "github"}  # PyGithub imports as `github`
+SDK_MODULES = {"anthropic", "openai", "github", "mcp"}  # PyGithub imports as `github`
 SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "aorc"
 
 
