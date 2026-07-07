@@ -438,3 +438,87 @@ def test_harness_threads_graphify_into_default_checkpoint(tmp_path):
 
     assert first == "proceed"
     assert second == "hold"
+
+
+# --- S19: docker secrets must never appear in host-visible argv ------------- #
+# `docker run -e KEY=value` puts the value in the host process table (`ps`);
+# the runtime must deliver env through a 0600 --env-file that is removed as
+# soon as `docker run` returns (S15/S16 known limitation, closed in S19).
+
+
+class _FakeDockerRun:
+    """Stands in for subprocess.run: captures argv and snapshots the
+    --env-file (contents + mode) *at call time*, since the file must be
+    gone by the time `start` returns."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.argv: list[str] | None = None
+        self.env_file_path: str | None = None
+        self.env_file_contents: str | None = None
+        self.env_file_mode: int | None = None
+
+    def __call__(self, argv, **kwargs):
+        import os as _os
+        import stat as _stat
+
+        self.argv = list(argv)
+        if "--env-file" in self.argv:
+            path = self.argv[self.argv.index("--env-file") + 1]
+            self.env_file_path = path
+            with open(path) as fh:
+                self.env_file_contents = fh.read()
+            self.env_file_mode = _stat.S_IMODE(_os.stat(path).st_mode)
+        if self.fail:
+            raise subprocess.CalledProcessError(1, argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def test_docker_start_keeps_secrets_out_of_argv(monkeypatch):
+    import os
+
+    from aorc.harness import DockerContainerRuntime
+
+    fake = _FakeDockerRun()
+    monkeypatch.setattr("aorc.harness.subprocess.run", fake)
+    runtime = DockerContainerRuntime("base:img")
+
+    handle = runtime.start(
+        7, "aorc/issue-7", "/tmp/wt", env={"GITHUB_TOKEN": "ghs_secret123"}
+    )
+
+    assert "ghs_secret123" not in " ".join(fake.argv)
+    assert "-e" not in fake.argv
+    assert "GITHUB_TOKEN=ghs_secret123\n" in fake.env_file_contents
+    assert fake.env_file_mode == 0o600
+    assert not os.path.exists(fake.env_file_path)  # deleted once run returned
+    assert handle.container_id == "aorc-issue-7"
+
+
+def test_docker_start_env_file_removed_even_when_docker_fails(monkeypatch):
+    import os
+
+    from aorc.harness import DockerContainerRuntime
+
+    fake = _FakeDockerRun(fail=True)
+    monkeypatch.setattr("aorc.harness.subprocess.run", fake)
+    runtime = DockerContainerRuntime("base:img")
+
+    with pytest.raises(subprocess.CalledProcessError):
+        runtime.start(7, "aorc/issue-7", "/tmp/wt", env={"KEY": "hunter2"})
+
+    assert fake.env_file_path is not None
+    assert not os.path.exists(fake.env_file_path)
+
+
+def test_docker_start_without_env_passes_no_env_file(monkeypatch):
+    from aorc.harness import DockerContainerRuntime
+
+    fake = _FakeDockerRun()
+    monkeypatch.setattr("aorc.harness.subprocess.run", fake)
+    runtime = DockerContainerRuntime("base:img")
+
+    runtime.start(8, "aorc/issue-8", "/tmp/wt", env=None)
+
+    assert "--env-file" not in fake.argv
+    assert "-e" not in fake.argv

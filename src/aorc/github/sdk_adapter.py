@@ -3,8 +3,9 @@
 The SDK is imported lazily so the orchestrator core and its tests run with zero
 third-party deps; only constructing/using this adapter touches `github`.
 
-This adapter is exercised by integration tests against a real repo, not the
-unit suite (which uses `MockGitHubClient`).
+This adapter is exercised by `tests/integration/test_github_sdk_integration.py`
+against a real repo (credential-gated, separate from the unit suite, which
+uses `MockGitHubClient`).
 """
 
 from __future__ import annotations
@@ -269,9 +270,9 @@ class SdkGitHubClient(GitHubClient):
     # to a single-select "Status" field value, set via the Projects v2 GraphQL
     # API (PyGithub has no first-class Projects v2 support).
     #
-    # NOTE: the configured GraphQL path has no automated coverage yet -- like the
-    # other real adapters (Docker, Claude/OpenAI, the rest of PyGithub) it awaits
-    # an integration harness. The no-op path is the one exercised until then.
+    # The configured GraphQL path is covered by the S19 integration suite
+    # (tests/integration/test_github_sdk_integration.py, credential-gated);
+    # the no-op path is the one the unit suite exercises.
     def _project_owner_number_field(self) -> tuple[str, int, str]:
         return (
             self._project["owner"],
@@ -301,8 +302,8 @@ class SdkGitHubClient(GitHubClient):
         the repo owner (or adopt the configured one) and set its single-select
         status field to exactly `columns`. New Projects v2 projects ship with
         a default "Status" field, so the option set is *updated*, never a
-        second field created. Same caveat as the rest of the GraphQL path:
-        no automated coverage until the S19 integration harness."""
+        second field created. Covered (opt-in, it creates a real project) by
+        the S19 integration suite."""
         owner = (self._project or {}).get("owner") or self._repo_name.split("/", 1)[0]
         field_name = (self._project or {}).get("status_field", "Status")
         if self._project is None:

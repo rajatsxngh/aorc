@@ -52,3 +52,13 @@ S2 + S17 →
 | S16 | Liveness & idempotency | S10 | — (B5–B7) |
 | S17 | Merge-time + auto-rollback | S8, S10 | 52–54 (B16–B18, B22, safety 9) |
 | S18 | GitHub App install | S2, S17 | 1–3, 5, 6 (B23, B27) |
+
+## Known open limitation (post-v1)
+
+A container holding its per-issue `GITHUB_TOKEN` can push or call the API
+directly, bypassing the orchestrator-side `ScrubbingGitHubClient` (layer-2
+scrubbing covers orchestrator-mediated writes only). Carried S15 → S16 → S18
+→ S19; S19 closed the `docker run -e` host-`ps` exposure half (env now via a
+0600 temp `--env-file`) but push mediation (orchestrator-side push /
+scrubbing egress proxy) requires the real in-container agent execution path,
+which v1 never builds. First work item for any v2.

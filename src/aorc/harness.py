@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import posixpath
 import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -122,8 +123,9 @@ class MockContainerRuntime(ContainerRuntime):
 class DockerContainerRuntime(ContainerRuntime):
     """Real per-issue container dispatch via the Docker CLI, from the
     pre-baked base image (Claude Code + skills + MCPs installed). Exercised
-    by integration tests against a real Docker daemon, not the unit suite
-    (which uses `MockContainerRuntime`)."""
+    by `tests/integration/test_docker_integration.py` against a real Docker
+    daemon (daemon-gated, separate from the unit suite, which uses
+    `MockContainerRuntime`); argv/env-file hygiene is unit-tested."""
 
     def __init__(self, base_image: str) -> None:
         self._base_image = base_image
@@ -136,21 +138,35 @@ class DockerContainerRuntime(ContainerRuntime):
         env: dict[str, str] | None = None,
     ) -> ContainerHandle:
         name = f"aorc-issue-{issue_number}"
+        # Secrets must never ride in argv: `docker run -e KEY=value` exposes
+        # the value to every user on the host via `ps`. Deliver env through a
+        # 0600 temp env-file instead, removed the moment `docker run` returns
+        # (docker reads it synchronously). Values must be single-line -- true
+        # of everything the S15 broker mints (tokens/keys).
         env_args: list[str] = []
-        for key, value in (env or {}).items():
-            env_args += ["-e", f"{key}={value}"]
-        subprocess.run(
-            [
-                "docker", "run", "-d", "--name", name,
-                *env_args,
-                "-v", f"{worktree_path}:/workspace",
-                "-w", "/workspace",
-                self._base_image,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        env_file: str | None = None
+        if env:
+            fd, env_file = tempfile.mkstemp(prefix="aorc-env-")  # 0600 by default
+            with os.fdopen(fd, "w") as fh:
+                for key, value in env.items():
+                    fh.write(f"{key}={value}\n")
+            env_args = ["--env-file", env_file]
+        try:
+            subprocess.run(
+                [
+                    "docker", "run", "-d", "--name", name,
+                    *env_args,
+                    "-v", f"{worktree_path}:/workspace",
+                    "-w", "/workspace",
+                    self._base_image,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            if env_file is not None:
+                os.unlink(env_file)
         return ContainerHandle(
             issue_number=issue_number,
             branch=branch,

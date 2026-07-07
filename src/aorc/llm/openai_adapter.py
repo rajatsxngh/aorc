@@ -57,8 +57,10 @@ class OpenAICompatibleLLMClient(LLMClient):
         # S14 seam error contract: transient transport/429/5xx failures become
         # `ProviderError` so orchestrator backoff can retry the same model.
         # Anything else (400 bad request, 401 auth) is not transient and
-        # propagates untouched. NOT integration-tested here (mocks only) --
-        # exercising the real SDK error paths is S19's job.
+        # propagates untouched. The happy path has real coverage
+        # (tests/integration/test_llm_integration.py); the SDK *error* paths
+        # are still asserted against mocks only -- provoking a real 429/5xx
+        # deterministically isn't practical in a smoke suite.
         try:
             resp = client.chat.completions.create(
                 model=self._model,

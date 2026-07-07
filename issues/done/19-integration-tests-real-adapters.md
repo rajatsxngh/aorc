@@ -30,12 +30,12 @@ job where those are provisioned.
 
 ## Acceptance criteria
 
-- [ ] Integration tests live in a separate path/marker from the unit suite and
+- [x] Integration tests live in a separate path/marker from the unit suite and
       do not run in the zero-dep unit run
-- [ ] Each of the four adapters has at least one test hitting its real call path
-- [ ] `SdkGitHubClient` Projects v2 board read/write covered against a real project
-- [ ] Tests skip (not error) when the SDK extra / credentials / daemon are missing
-- [ ] CI job provisions the extras + secrets and runs the integration suite
+- [x] Each of the four adapters has at least one test hitting its real call path
+- [x] `SdkGitHubClient` Projects v2 board read/write covered against a real project
+- [x] Tests skip (not error) when the SDK extra / credentials / daemon are missing
+- [x] CI job provisions the extras + secrets and runs the integration suite
 
 ## Known limitation inherited from S15/S16 (S18 did not address it)
 
@@ -62,3 +62,34 @@ stop passing secrets as `docker run -e KEY=value` (visible in host `ps`;
 
 - S1 (the adapters exist). Board coverage assumes the Projects v2 path shipped
   in the board-column fix.
+
+## Outcome (S19 close-out — honesty record)
+
+- `tests/integration/` (marker `integration`, deselected from the unit run via
+  pyproject `addopts`) covers all four adapters; `.github/workflows/ci.yml`
+  runs unit and integration as separate jobs, integration provisioned from
+  repo secrets/vars (model names via vars, never code).
+- **Actually executed against a live service in this iteration:**
+  `ClaudeLLMClient.complete()` (real Anthropic API call, passed). Everything
+  else (`OpenAICompatibleLLMClient` hosted + local, `SdkGitHubClient` incl.
+  both Projects v2 board paths, `DockerContainerRuntime`) was verified only
+  down its skip path here — no OpenAI key, GitHub token, or Docker daemon on
+  this box. Those tests are real code awaiting CI credentials, not proven
+  green against live services yet.
+- The S14 error contract (real SDK 429/5xx → `ProviderError`) is still
+  asserted against mocks only; the smoke suite can't provoke those
+  deterministically.
+- Inherited S15/S16 limitation, first half **fixed**: `DockerContainerRuntime`
+  no longer passes secrets as `docker run -e KEY=value` (host-`ps`-visible);
+  env now goes through a 0600 temp `--env-file` removed as soon as `docker
+  run` returns (unit-pinned, incl. the failure path).
+- Second half **not addressed and now recorded in `issues/README.md` as a
+  known open limitation**: a container holding `GITHUB_TOKEN` can still push
+  or hit the API directly, bypassing `ScrubbingGitHubClient`. Mediating agent
+  pushes (orchestrator-side push from the shared worktree, or a scrubbing
+  egress proxy) needs the real in-container agent execution path, which no
+  v1 slice builds — there is nothing real to plumb it into yet, and S15's
+  audit already established that shelf code nothing composes is a defect,
+  not progress.
+- The optional actionlint smoke check on the generated rollback workflow was
+  not added (the YAML remains parse-tested only, per S18).

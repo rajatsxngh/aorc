@@ -1,0 +1,61 @@
+# AORC CI (S19): two jobs mirroring the two suites.
+#
+# - unit: the zero-dep suite; installs only [dev], integration tests are
+#   deselected by the `-m "not integration"` in pyproject addopts.
+# - integration: installs the real SDK extras, provisions credentials from
+#   repo secrets/vars, and selects the integration marker explicitly. Every
+#   integration test skips (never fails) when its credential/daemon is
+#   absent, so the job stays green on forks and before secrets are
+#   configured -- but with secrets set, the four real adapters are exercised
+#   for real (Docker via the daemon preinstalled on ubuntu-latest runners).
+#
+# Model names come from repo *vars*, never from code (invariant #2).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    name: Unit (zero-dep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (dev only, no SDK extras)
+        run: python -m pip install -e ".[dev]"
+      - name: Run unit suite
+        run: pytest -q
+
+  integration:
+    name: Integration (real adapters)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with all SDK extras
+        run: python -m pip install -e ".[dev,claude,openai,github]"
+      - name: Run integration suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AORC_IT_CLAUDE_MODEL: ${{ vars.AORC_IT_CLAUDE_MODEL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AORC_IT_OPENAI_MODEL: ${{ vars.AORC_IT_OPENAI_MODEL }}
+          # Throwaway repo the GitHub adapter tests may mutate.
+          AORC_IT_GITHUB_TOKEN: ${{ secrets.AORC_IT_GITHUB_TOKEN }}
+          AORC_IT_GITHUB_REPO: ${{ vars.AORC_IT_GITHUB_REPO }}
+          # Optional: a pre-configured Projects v2 board for the column
+          # round-trip, and the opt-in for the create_board test.
+          AORC_IT_GITHUB_PROJECT_OWNER: ${{ vars.AORC_IT_GITHUB_PROJECT_OWNER }}
+          AORC_IT_GITHUB_PROJECT_NUMBER: ${{ vars.AORC_IT_GITHUB_PROJECT_NUMBER }}
+          AORC_IT_GITHUB_PROJECT_COLUMN: ${{ vars.AORC_IT_GITHUB_PROJECT_COLUMN }}
+          AORC_IT_GITHUB_ALLOW_CREATE_PROJECT: ${{ vars.AORC_IT_GITHUB_ALLOW_CREATE_PROJECT }}
+          AORC_IT_DOCKER_IMAGE: ${{ vars.AORC_IT_DOCKER_IMAGE }}
+        run: pytest -q -m integration tests/integration

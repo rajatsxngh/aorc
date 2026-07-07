@@ -26,9 +26,16 @@ packages = ["src/aorc"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-ra"
+# The default run is the zero-dep unit suite: integration tests (real SDKs,
+# credentials, Docker daemon) are deselected here and selected explicitly in
+# CI's integration job via `pytest -m integration tests/integration`
+# (a command-line -m overrides this one).
+addopts = "-ra -m 'not integration'"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: real-adapter smoke test; needs SDK extras + credentials/daemon, skips cleanly when absent",
+]
 
 [tool.coverage.run]
 source = ["src/aorc"]
