@@ -59,8 +59,14 @@ class AorcConfig:
     cost_daily_cap: float = 100.0
     cost_overshoot_multiplier: float = 1.5
     compute_wall_clock_minutes: float = 45.0
+    container_runtime: str = "docker"
+    container_workflow_file: str | None = None
     raw: dict = field(default_factory=dict)
 
+
+# S25: the two `ContainerRuntime` implementations selectable from `.aorc.yml`
+# (invariant #2 -- runtime choice is config, never a code-level default swap).
+VALID_CONTAINER_RUNTIMES = {"docker", "actions"}
 
 # The fields without which the build pipeline cannot run: a missing one
 # blocks the repo's build pipeline (S18 install-time behavior) -- guessing
@@ -187,6 +193,22 @@ def parse_config(raw: dict) -> AorcConfig:
     if not isinstance(compute, dict):
         raise ConfigError("`compute` must be a mapping")
 
+    container = raw.get("container") or {}
+    if not isinstance(container, dict):
+        raise ConfigError("`container` must be a mapping")
+    container_runtime = str(container.get("runtime", "docker")).strip().lower()
+    if container_runtime not in VALID_CONTAINER_RUNTIMES:
+        raise ConfigError(
+            f"container.runtime must be one of {sorted(VALID_CONTAINER_RUNTIMES)}; "
+            f"got {container_runtime!r}"
+        )
+    container_workflow_file = container.get("workflow_file")
+    if container_runtime == "actions" and not container_workflow_file:
+        raise ConfigError(
+            "container.runtime: actions requires container.workflow_file "
+            "(the generated workflow's filename under .github/workflows/)"
+        )
+
     # S13: never opt into a larger-than-default GitHub runner. The only
     # valid value for `runner`, if present at all, is "default" -- fail
     # closed on anything else rather than silently ignoring the opt-in.
@@ -217,5 +239,7 @@ def parse_config(raw: dict) -> AorcConfig:
         cost_daily_cap=float(cost.get("daily_cap", 100.0)),
         cost_overshoot_multiplier=float(cost.get("overshoot_multiplier", 1.5)),
         compute_wall_clock_minutes=float(compute.get("wall_clock_minutes", 45.0)),
+        container_runtime=container_runtime,
+        container_workflow_file=container_workflow_file,
         raw=raw,
     )

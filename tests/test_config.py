@@ -179,6 +179,41 @@ def test_runner_field_accepts_default(tmp_path, monkeypatch):
     assert cfg.cost_per_issue_cap == 5.0
 
 
+def test_container_runtime_defaults_to_docker(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    cfg = load_config(_write(tmp_path, SAMPLE.format(primary_model="a", esc_model="b")))
+    assert cfg.container_runtime == "docker"
+    assert cfg.container_workflow_file is None
+
+
+def test_container_runtime_actions_requires_a_workflow_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    with_actions = SAMPLE.format(primary_model="a", esc_model="b") + (
+        "container:\n  runtime: actions\n"
+    )
+    with pytest.raises(ConfigError, match="workflow_file"):
+        load_config(_write(tmp_path, with_actions))
+
+
+def test_container_runtime_actions_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    with_actions = SAMPLE.format(primary_model="a", esc_model="b") + (
+        "container:\n  runtime: actions\n  workflow_file: aorc-build.yml\n"
+    )
+    cfg = load_config(_write(tmp_path, with_actions))
+    assert cfg.container_runtime == "actions"
+    assert cfg.container_workflow_file == "aorc-build.yml"
+
+
+def test_container_runtime_rejects_unknown_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("AORC_TEST_KEY", "s3cr3t")
+    with_bad = SAMPLE.format(primary_model="a", esc_model="b") + (
+        "container:\n  runtime: kubernetes\n"
+    )
+    with pytest.raises(ConfigError, match="container.runtime"):
+        load_config(_write(tmp_path, with_bad))
+
+
 def test_no_model_names_hardcoded_in_source():
     """Architecture invariant #2 — model names live in config, not code."""
     import pathlib

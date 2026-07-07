@@ -406,6 +406,123 @@ def test_compose_dev_pat_minter_flag_uses_the_passthrough_minter(tmp_path, monke
     assert token.token == "ghs_" + "a" * 36
 
 
+# --------------------------------------------------------------------------- #
+# S25: runtime selection (Docker vs Actions) comes from `.aorc.yml`
+# --------------------------------------------------------------------------- #
+
+ACTIONS_CONFIG = """
+llm:
+  primary: { provider: claude, model: test-model }
+setup: pip install -e .
+test: pytest -q
+container:
+  runtime: actions
+  workflow_file: aorc-build.yml
+"""
+
+
+def test_compose_defaults_to_docker_runtime_when_container_block_absent(
+    tmp_path, monkeypatch
+):
+    cfg_path = tmp_path / ".aorc.yml"
+    cfg_path.write_text(VALID_CONFIG)
+    config = load_config(cfg_path)
+    monkeypatch.setenv(GITHUB_TOKEN_ENV, "ghp_" + "a" * 36)
+    monkeypatch.setenv(BASE_IMAGE_ENV, "aorc/base:latest")
+
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+    )
+
+    from aorc.harness import DockerContainerRuntime
+
+    assert isinstance(collaborators.loop.harness._runtime, DockerContainerRuntime)
+
+
+def test_compose_selects_actions_runtime_and_mints_its_own_actions_write_token(
+    tmp_path, monkeypatch
+):
+    from aorc.__main__ import APP_ID_ENV, APP_PRIVATE_KEY_PATH_ENV
+
+    cfg_path = tmp_path / ".aorc.yml"
+    cfg_path.write_text(ACTIONS_CONFIG)
+    config = load_config(cfg_path)
+    key_path = tmp_path / "app-key.pem"
+    key_path.write_text("-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n")
+    monkeypatch.setenv(APP_ID_ENV, "app-123")
+    monkeypatch.setenv(APP_PRIVATE_KEY_PATH_ENV, str(key_path))
+    monkeypatch.setenv(GITHUB_TOKEN_ENV, "ghp_" + "a" * 36)
+
+    captured_minter_calls = []
+
+    def fake_build_app_token_minter(app_id):
+        def minter(private_key, repo, permissions):
+            captured_minter_calls.append((app_id, repo, dict(permissions)))
+            return "ghs_actions_token"
+
+        return minter
+
+    import aorc.github.app_token as app_token_module
+
+    monkeypatch.setattr(app_token_module, "build_app_token_minter", fake_build_app_token_minter)
+
+    collaborators = compose(
+        config, "acme/widget", github=MockGitHubClient(), worktrees=FakeWorktrees()
+    )
+
+    from aorc.github.actions_runtime import ActionsContainerRuntime
+
+    runtime = collaborators.loop.harness._runtime
+    assert isinstance(runtime, ActionsContainerRuntime)
+    assert runtime._workflow_file == "aorc-build.yml"
+    assert runtime._token == "ghs_actions_token"
+    assert captured_minter_calls == [("app-123", "acme/widget", {"actions": "write"})]
+
+
+def test_compose_actions_runtime_fails_closed_on_missing_app_id(tmp_path, monkeypatch):
+    from aorc.__main__ import APP_ID_ENV, APP_PRIVATE_KEY_PATH_ENV
+
+    cfg_path = tmp_path / ".aorc.yml"
+    cfg_path.write_text(ACTIONS_CONFIG)
+    config = load_config(cfg_path)
+    monkeypatch.delenv(APP_ID_ENV, raising=False)
+    monkeypatch.delenv(APP_PRIVATE_KEY_PATH_ENV, raising=False)
+
+    with pytest.raises(StartupError, match=APP_ID_ENV):
+        compose(
+            config,
+            "acme/widget",
+            github=MockGitHubClient(),
+            worktrees=FakeWorktrees(),
+            broker=CredentialBroker("", CountingMinter()),
+        )
+
+
+def test_compose_actions_runtime_dev_pat_minter_reuses_the_github_pat(tmp_path, monkeypatch):
+    cfg_path = tmp_path / ".aorc.yml"
+    cfg_path.write_text(ACTIONS_CONFIG)
+    config = load_config(cfg_path)
+    monkeypatch.setenv(GITHUB_TOKEN_ENV, "ghp_" + "a" * 36)
+
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        worktrees=FakeWorktrees(),
+        dev_pat_minter=True,
+    )
+
+    from aorc.github.actions_runtime import ActionsContainerRuntime
+
+    runtime = collaborators.loop.harness._runtime
+    assert isinstance(runtime, ActionsContainerRuntime)
+    assert runtime._token == "ghp_" + "a" * 36
+
+
 def test_run_threads_dev_pat_minter_flag_into_compose(tmp_path, monkeypatch):
     import aorc.__main__ as main_module
 

@@ -57,6 +57,12 @@ APP_ID_ENV = "AORC_GITHUB_APP_ID"
 APP_PRIVATE_KEY_PATH_ENV = "AORC_GITHUB_APP_PRIVATE_KEY_PATH"
 WEBHOOK_SECRET_ENV = "AORC_WEBHOOK_SECRET"
 
+# S25: the orchestrator-side token `ActionsContainerRuntime` authenticates its
+# own workflow_dispatch/cancel calls with -- wider than
+# `credentials.MINIMAL_PERMISSIONS` (that ceiling bounds per-issue *container*
+# tokens only) and minted once here, never per issue.
+ACTIONS_RUNTIME_PERMISSIONS = {"actions": "write"}
+
 
 class StartupError(Exception):
     """A required environment variable is absent. Raised instead of
@@ -139,10 +145,29 @@ def compose(
         # as-is -- backoff is a real-adapter concern only.
         llm = BackoffLLMClient(build_llm_client(config.primary))
     if runtime is None:
-        from .harness import DockerContainerRuntime
+        if config.container_runtime == "actions":
+            from .github.actions_runtime import ActionsContainerRuntime
 
-        image = base_image or _require_env(BASE_IMAGE_ENV)
-        runtime = DockerContainerRuntime(image)
+            if dev_pat_minter:
+                # Same dev escape hatch as the broker's `--dev-pat-minter`:
+                # no App registered, so the orchestrator's own PAT
+                # authenticates the dispatch/cancel calls too. Never use live.
+                actions_token = _require_env(GITHUB_TOKEN_ENV)
+            else:
+                from .github.app_token import build_app_token_minter
+
+                app_id = _require_env(APP_ID_ENV)
+                key_path = _require_env(APP_PRIVATE_KEY_PATH_ENV)
+                private_key = Path(key_path).read_text()
+                actions_token = build_app_token_minter(app_id)(
+                    private_key, repo, ACTIONS_RUNTIME_PERMISSIONS
+                )
+            runtime = ActionsContainerRuntime(repo, config.container_workflow_file, actions_token)
+        else:
+            from .harness import DockerContainerRuntime
+
+            image = base_image or _require_env(BASE_IMAGE_ENV)
+            runtime = DockerContainerRuntime(image)
     if worktrees is None:
         worktrees = WorktreeManager(repo_dir, worktrees_dir)
     if broker is None:

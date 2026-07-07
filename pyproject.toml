@@ -18,6 +18,11 @@ github = ["PyGithub>=2.4"]
 # separate from `github` since it's PyGithub-independent (plain stdlib
 # urllib does the HTTP half -- see src/aorc/github/app_token.py).
 apptoken = ["PyJWT[crypto]>=2.8"]
+# ActionsContainerRuntime (S25): libsodium sealed-box encryption for the
+# per-issue secret delivery path -- plain stdlib urllib does the HTTP half
+# (see src/aorc/github/actions_runtime.py), so this is PyGithub-independent
+# too.
+actions = ["PyNaCl>=1.5"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

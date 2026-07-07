@@ -69,7 +69,8 @@ hardcoded models or secrets):
   escape hatch — never use it for a live run).
 - `AORC_REPO` — `owner/repo` (or pass `--repo`).
 - `AORC_BASE_IMAGE` — the Docker image `DockerContainerRuntime` starts
-  per-issue containers from.
+  per-issue containers from. Only required when `.aorc.yml`'s
+  `container.runtime` is `docker` (the default) or absent.
 - Whatever `.aorc.yml`'s `llm:` block references for provider API keys (e.g.
   `$ANTHROPIC_KEY`), expanded by `config.py`.
 - `AORC_WEBHOOK_SECRET` — the GitHub App's webhook secret, needed only by
@@ -95,6 +96,55 @@ Dev loop with no public URL yet: tunnel a local `serve` with
 http://localhost:8080/webhook`) or `ngrok http 8080`, and point the GitHub
 App's webhook URL at the tunnel's public address while iterating.
 
+### Container runtime: Docker or Actions (S25)
+
+`ConfigGatedWakeLoop` dispatches every issue's build through one
+`ContainerRuntime`, selected by `.aorc.yml`'s `container:` block (invariant
+#2 — the choice is config, not a code-level default swap) and constructed
+only at the `compose()` root (invariant #1):
+
+```yaml
+container:
+  runtime: docker            # default; omit the whole block for this
+  # runtime: actions
+  # workflow_file: aorc-build.yml   # required when runtime: actions
+```
+
+`runtime: actions` builds an `ActionsContainerRuntime`
+(`aorc.github.actions_runtime`) that fires a real `workflow_dispatch` on
+`workflow_file` instead of starting a local Docker container, then resolves
+and later cancels the resulting run. It authenticates with its own
+orchestrator-side App token, scoped to `actions: write` and minted once at
+composition (wider than `credentials.MINIMAL_PERMISSIONS`, which only bounds
+per-issue *container* tokens) — under `--dev-pat-minter` it reuses the fixed
+`GITHUB_TOKEN` PAT instead, same escape hatch as the broker's.
+
+The per-issue env (the S15 broker's `GITHUB_TOKEN` + LLM key) never rides in
+`workflow_dispatch` inputs — those are visible in run logs and the runs-list
+API — instead each value is sealed (libsodium sealed-box, via the `actions`
+extra: `uv pip install -e ".[actions]"`, PyNaCl) against the target repo's
+Actions public key and written as a repository secret
+(`AORC_ISSUE_<n>_<KEY>`) immediately before dispatch; `teardown` deletes
+those secrets again once the run is cancelled. This mirrors
+`DockerContainerRuntime.start`'s env-file discipline (S19): a per-issue
+credential never outlives the issue and never touches argv/logs.
+
+**Known gap:** `ActionsContainerRuntime` is unit-tested against a fake
+transport (`tests/test_actions_runtime.py`) and has a credential-gated
+integration test (`tests/integration/test_actions_runtime_integration.py`,
+`AORC_IT_GITHUB_TOKEN`/`AORC_IT_GITHUB_REPO`/`AORC_IT_GITHUB_WORKFLOW_FILE`)
+that dispatches and cancels one real run — but that integration test has
+**not** been run against a real repo this iteration (confirmed only that it
+skips cleanly without credentials, same honesty caveat as S23/S24's App-token
+and webhook work). The generated `aorc-rollback.yml` (S17/S18) has also never
+been exercised live end-to-end (red main → auto-revert → `repository_dispatch`
+→ `on_main_broken`) — only gated by a new CI `actionlint` job
+(`.github/workflows/ci.yml`) that renders `install.ROLLBACK_WORKFLOW` to a
+file and statically lints it, which itself has not been observed to actually
+run (no `actionlint`/Docker available in this dev sandbox). See
+`issues/25-actions-execution-wiring.md` for the full open scope (PR-number
+extraction under squash merges, the live sandbox exercise).
+
 ### One-time GitHub App registration (S23)
 
 The real minter needs a registered GitHub App — this part is manual, not
@@ -107,7 +157,11 @@ automated by any AORC code:
    `MINIMAL_PERMISSIONS` ceiling exactly (broader App permissions than that
    ceiling do nothing useful; `CredentialBroker.mint` still narrows every
    per-issue request down to it, and GitHub separately enforces the App's
-   own grant as the hard ceiling).
+   own grant as the hard ceiling). Add repository-level `Actions: Read &
+   write` too if this repo will use `container.runtime: actions` (S25) — that
+   permission backs `ActionsContainerRuntime`'s own dispatch/cancel token,
+   never a per-issue container token, so it sits outside
+   `MINIMAL_PERMISSIONS` on purpose.
 3. Subscribe to the webhooks S24 will consume (`issues`, `issue_comment`,
    `pull_request`, `repository_dispatch`) — not yet consumed live until S24
    lands, but fine to subscribe to now.
