@@ -14,6 +14,10 @@ aorc = "aorc.__main__:main"
 claude = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]
 github = ["PyGithub>=2.4"]
+# App-JWT -> installation-token exchange (S23): RS256 signing only, kept
+# separate from `github` since it's PyGithub-independent (plain stdlib
+# urllib does the HTTP half -- see src/aorc/github/app_token.py).
+apptoken = ["PyJWT[crypto]>=2.8"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

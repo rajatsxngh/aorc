@@ -26,6 +26,7 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from .coder import CoderStage
 from .config import AorcConfig, ConfigError, load_config
@@ -47,6 +48,8 @@ DEFAULT_WORKTREES_DIR = ".aorc-worktrees"
 GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 REPO_ENV = "AORC_REPO"
 BASE_IMAGE_ENV = "AORC_BASE_IMAGE"
+APP_ID_ENV = "AORC_GITHUB_APP_ID"
+APP_PRIVATE_KEY_PATH_ENV = "AORC_GITHUB_APP_PRIVATE_KEY_PATH"
 
 
 class StartupError(Exception):
@@ -63,12 +66,12 @@ def _require_env(name: str) -> str:
 
 
 def pat_passthrough_minter(token: str):
-    """The S23 stand-in for the real App-JWT -> installation-token exchange
-    (issues/23-real-token-minter.md): until that exchange exists, every mint
-    request returns this one fixed PAT regardless of repo/permissions asked
-    for. This function is the single, clearly-marked injection point --
-    swapping in the real S23 minter is a one-line change at its one call
-    site in `compose()` below."""
+    """S23's `--dev-pat-minter` escape hatch: every mint request returns this
+    one fixed PAT regardless of repo/permissions asked for, bypassing the
+    real App-JWT exchange entirely. Demoted from S21's *default* stand-in to
+    an explicit opt-in now that `build_app_token_minter` (app_token.py) is
+    the real thing -- useful for a dev loop with no GitHub App registered at
+    all, never for a live run."""
 
     def minter(private_key: str, repo: str, permissions: dict) -> str:
         return token
@@ -104,6 +107,7 @@ def compose(
     repo_dir: str = ".",
     worktrees_dir: str = DEFAULT_WORKTREES_DIR,
     base_image: str | None = None,
+    dev_pat_minter: bool = False,
 ) -> Collaborators:
     """Build the real collaborators and hand back the composed
     `ConfigGatedWakeLoop` + `InstallHandler`. Every parameter is overridable
@@ -134,16 +138,32 @@ def compose(
     if worktrees is None:
         worktrees = WorktreeManager(repo_dir, worktrees_dir)
     if broker is None:
-        # Interim S23 stand-in (see `pat_passthrough_minter`): no App private
-        # key exists yet, so the broker holds an empty one -- it is never
-        # consulted by the passthrough minter, and `container_env`'s leak
-        # check no-ops on an empty/falsy key by construction.
-        token = _require_env(GITHUB_TOKEN_ENV)
-        broker = CredentialBroker(
-            private_key="",
-            minter=pat_passthrough_minter(token),
-            llm_api_key=config.primary.api_key,
-        )
+        if dev_pat_minter:
+            # `--dev-pat-minter` escape hatch: no App private key exists, so
+            # the broker holds an empty one -- it is never consulted by the
+            # passthrough minter, and `container_env`'s leak check no-ops on
+            # an empty/falsy key by construction.
+            token = _require_env(GITHUB_TOKEN_ENV)
+            broker = CredentialBroker(
+                private_key="",
+                minter=pat_passthrough_minter(token),
+                llm_api_key=config.primary.api_key,
+            )
+        else:
+            # S23: the real App-JWT -> installation-token exchange. The key
+            # *material* is read here, at the composition root, and handed
+            # only to `CredentialBroker` -- nothing downstream ever sees the
+            # path or the key itself (invariant #2).
+            from .github.app_token import build_app_token_minter
+
+            app_id = _require_env(APP_ID_ENV)
+            key_path = _require_env(APP_PRIVATE_KEY_PATH_ENV)
+            private_key = Path(key_path).read_text()
+            broker = CredentialBroker(
+                private_key=private_key,
+                minter=build_app_token_minter(app_id),
+                llm_api_key=config.primary.api_key,
+            )
     loop = ConfigGatedWakeLoop.compose(
         github,
         runtime,
@@ -214,6 +234,15 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repo", default=None, help=f"owner/repo; defaults to ${REPO_ENV}"
     )
+    parser.add_argument(
+        "--dev-pat-minter",
+        action="store_true",
+        help=(
+            "dev escape hatch: mint every per-issue container token as the fixed "
+            f"${GITHUB_TOKEN_ENV} PAT instead of the real GitHub App exchange "
+            f"(no ${APP_ID_ENV}/${APP_PRIVATE_KEY_PATH_ENV} needed). Never use live."
+        ),
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("install", help="run the S18 install flow (board, labels, config PR, backfill)")
     sub.add_parser("backfill", help="re-sync: triage every open issue not already in the flow")
@@ -234,7 +263,7 @@ def run(argv: list[str] | None = None, *, collaborators: Collaborators | None = 
         try:
             config = load_config(args.config)
             repo = args.repo or _require_env(REPO_ENV)
-            collaborators = compose(config, repo)
+            collaborators = compose(config, repo, dev_pat_minter=args.dev_pat_minter)
         except (ConfigError, StartupError) as exc:
             print(f"aorc: {exc}", file=sys.stderr)
             return 1

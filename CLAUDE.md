@@ -56,15 +56,51 @@ python -m aorc run-issue 42  # dispatch a single actionable issue
 Required environment, read only at the composition root (invariant #2 — no
 hardcoded models or secrets):
 
-- `GITHUB_TOKEN` — a GitHub token for `SdkGitHubClient`, and, until S23 lands
-  the real App-JWT → installation-token exchange, also the value returned by
-  the interim PAT-passthrough minter (`aorc.__main__.pat_passthrough_minter`,
-  a single clearly-marked stand-in for `CredentialBroker`'s real minter).
+- `GITHUB_TOKEN` — a GitHub token for `SdkGitHubClient` (the orchestrator's
+  own issue/label/PR operations).
+- `AORC_GITHUB_APP_ID` + `AORC_GITHUB_APP_PRIVATE_KEY_PATH` — the registered
+  GitHub App's ID and a filesystem path to its PEM private key, consumed only
+  by `CredentialBroker`'s real minter (`aorc.github.app_token.
+  build_app_token_minter`, S23) to mint per-issue, single-repo, short-lived
+  container tokens via the App-JWT → installation-token exchange. Pass
+  `--dev-pat-minter` to skip both and fall back to a fixed `GITHUB_TOKEN` PAT
+  for every container instead (`aorc.__main__.pat_passthrough_minter`, a dev
+  escape hatch — never use it for a live run).
 - `AORC_REPO` — `owner/repo` (or pass `--repo`).
 - `AORC_BASE_IMAGE` — the Docker image `DockerContainerRuntime` starts
   per-issue containers from.
 - Whatever `.aorc.yml`'s `llm:` block references for provider API keys (e.g.
   `$ANTHROPIC_KEY`), expanded by `config.py`.
+
+### One-time GitHub App registration (S23)
+
+The real minter needs a registered GitHub App — this part is manual, not
+automated by any AORC code:
+
+1. On the target GitHub org/user: **Settings → Developer settings → GitHub
+   Apps → New GitHub App**.
+2. Permissions: repository-level `Contents: Read & write`, `Issues: Read &
+   write`, `Pull requests: Read & write` — matching `credentials.py`'s
+   `MINIMAL_PERMISSIONS` ceiling exactly (broader App permissions than that
+   ceiling do nothing useful; `CredentialBroker.mint` still narrows every
+   per-issue request down to it, and GitHub separately enforces the App's
+   own grant as the hard ceiling).
+3. Subscribe to the webhooks S24 will consume (`issues`, `issue_comment`,
+   `pull_request`, `repository_dispatch`) — not yet consumed live until S24
+   lands, but fine to subscribe to now.
+4. Generate and download a private key (PEM) from the App's settings page.
+   Store it outside version control; point `AORC_GITHUB_APP_PRIVATE_KEY_PATH`
+   at it.
+5. **Install** the App on the target repository (App's page → Install App).
+   Note the App ID (shown on the App's settings page) for
+   `AORC_GITHUB_APP_ID`.
+6. Install the exchange's extra: `uv pip install -e ".[apptoken]"` (PyJWT +
+   cryptography — separate from the `github` extra since the HTTP half of
+   the exchange is plain stdlib `urllib`, not PyGithub).
+
+`tests/integration/test_github_app_token_integration.py` (credential-gated,
+`AORC_IT_GITHUB_APP_ID`/`AORC_IT_GITHUB_APP_PRIVATE_KEY`/`AORC_IT_GITHUB_REPO`)
+exercises the real exchange end-to-end once an App is registered this way.
 
 `.aorc.yml` (default path `./.aorc.yml`, override with `--config`) must exist
 and parse — absent, malformed, or missing `setup`/`test` fails closed with a

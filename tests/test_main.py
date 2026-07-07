@@ -257,6 +257,119 @@ def test_pat_passthrough_minter_returns_fixed_token_regardless_of_args():
 
 
 # --------------------------------------------------------------------------- #
+# S23: default broker is the real App-JWT minter; --dev-pat-minter opts out
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_default_broker_fails_closed_on_missing_app_id(tmp_path, monkeypatch):
+    from aorc.__main__ import APP_ID_ENV, APP_PRIVATE_KEY_PATH_ENV
+
+    cfg_path = tmp_path / ".aorc.yml"
+    cfg_path.write_text(VALID_CONFIG)
+    config = load_config(cfg_path)
+    monkeypatch.delenv(APP_ID_ENV, raising=False)
+    monkeypatch.delenv(APP_PRIVATE_KEY_PATH_ENV, raising=False)
+
+    with pytest.raises(StartupError, match=APP_ID_ENV):
+        compose(
+            config,
+            "acme/widget",
+            github=MockGitHubClient(),
+            runtime=MockContainerRuntime(),
+            worktrees=FakeWorktrees(),
+        )
+
+
+def test_compose_default_broker_fails_closed_on_missing_private_key_path(
+    tmp_path, monkeypatch
+):
+    from aorc.__main__ import APP_ID_ENV, APP_PRIVATE_KEY_PATH_ENV
+
+    cfg_path = tmp_path / ".aorc.yml"
+    cfg_path.write_text(VALID_CONFIG)
+    config = load_config(cfg_path)
+    monkeypatch.setenv(APP_ID_ENV, "app-123")
+    monkeypatch.delenv(APP_PRIVATE_KEY_PATH_ENV, raising=False)
+
+    with pytest.raises(StartupError, match=APP_PRIVATE_KEY_PATH_ENV):
+        compose(
+            config,
+            "acme/widget",
+            github=MockGitHubClient(),
+            runtime=MockContainerRuntime(),
+            worktrees=FakeWorktrees(),
+        )
+
+
+def test_compose_default_broker_reads_key_material_from_the_configured_path(
+    tmp_path, monkeypatch
+):
+    from aorc.__main__ import APP_ID_ENV, APP_PRIVATE_KEY_PATH_ENV
+
+    cfg_path = tmp_path / ".aorc.yml"
+    cfg_path.write_text(VALID_CONFIG)
+    config = load_config(cfg_path)
+    key_path = tmp_path / "app-key.pem"
+    key_path.write_text("-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n")
+    monkeypatch.setenv(APP_ID_ENV, "app-123")
+    monkeypatch.setenv(APP_PRIVATE_KEY_PATH_ENV, str(key_path))
+
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+    )
+
+    broker = collaborators.loop._broker
+    # Key material read from the configured path, handed only to the broker
+    # (invariant #2) -- constructing the real minter must itself be
+    # dependency-free; only an actual `.mint()` call touches PyJWT/network.
+    assert broker._private_key == key_path.read_text()
+    assert broker._minter.__module__ == "aorc.github.app_token"
+
+
+def test_compose_dev_pat_minter_flag_uses_the_passthrough_minter(tmp_path, monkeypatch):
+    cfg_path = tmp_path / ".aorc.yml"
+    cfg_path.write_text(VALID_CONFIG)
+    config = load_config(cfg_path)
+    monkeypatch.setenv(GITHUB_TOKEN_ENV, "ghs_" + "a" * 36)
+
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        dev_pat_minter=True,
+    )
+
+    token = collaborators.loop._broker.mint(1, "acme/widget")
+    assert token.token == "ghs_" + "a" * 36
+
+
+def test_run_threads_dev_pat_minter_flag_into_compose(tmp_path, monkeypatch):
+    import aorc.__main__ as main_module
+
+    cfg_path = tmp_path / ".aorc.yml"
+    cfg_path.write_text(VALID_CONFIG)
+    monkeypatch.setenv(REPO_ENV, "acme/widget")
+    captured = {}
+
+    def fake_compose(config, repo, **kwargs):
+        captured.update(kwargs)
+        return make_collaborators()
+
+    monkeypatch.setattr(main_module, "compose", fake_compose)
+
+    code = run(["--config", str(cfg_path), "--dev-pat-minter", "backfill"])
+
+    assert code == 0
+    assert captured["dev_pat_minter"] is True
+
+
+# --------------------------------------------------------------------------- #
 # Subcommands, end to end, against in-memory mocks (zero third-party deps)
 # --------------------------------------------------------------------------- #
 
