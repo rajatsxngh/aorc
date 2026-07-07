@@ -5,6 +5,9 @@ description = "Autonomous Orchestrated Repo Contributor — an unattended issue-
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+aorc = "aorc.__main__:main"
+
 [project.optional-dependencies]
 # Real provider/GitHub SDKs live behind adapters (S1+). Kept optional so the
 # orchestrator core and its tests run with zero third-party deps.

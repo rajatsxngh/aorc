@@ -133,6 +133,8 @@ def _parse_slot(data: Any, where: str) -> ModelSlot:
 def load_config(path: str | Path) -> AorcConfig:
     """Parse a `.aorc.yml` file into an `AorcConfig`. Fails closed."""
     path = Path(path)
+    if not path.is_file():
+        raise ConfigError(f"{path} does not exist -- the install config PR must merge first")
     try:
         raw = yaml.safe_load(path.read_text())
     except yaml.YAMLError as exc:  # malformed YAML
