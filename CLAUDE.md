@@ -49,6 +49,7 @@ python -m aorc install       # board + labels + config PR + immediate backfill
 python -m aorc backfill      # re-sync: triage every open issue not in the flow
 python -m aorc wake          # one cron tick: held-queue sweep + token-expiry pass
 python -m aorc run-issue 42  # dispatch a single actionable issue
+python -m aorc serve         # webhook receiver (HMAC-verified GitHub deliveries)
 ```
 
 (also installed as the `aorc` console script via `[project.scripts]`.)
@@ -71,6 +72,28 @@ hardcoded models or secrets):
   per-issue containers from.
 - Whatever `.aorc.yml`'s `llm:` block references for provider API keys (e.g.
   `$ANTHROPIC_KEY`), expanded by `config.py`.
+- `AORC_WEBHOOK_SECRET` — the GitHub App's webhook secret, needed only by
+  `python -m aorc serve` (S24). Read once here and handed straight to
+  `aorc.webhook.serve`; never logged, never echoed in a response.
+
+### Webhook receiver (S24)
+
+`python -m aorc serve [--host 0.0.0.0] [--port 8080]` starts a small stdlib
+`http.server` (`aorc/webhook.py`) that verifies `X-Hub-Signature-256` on every
+POST (`hmac.compare_digest`, constant-time) before parsing the body — a
+missing or wrong signature is a 401 and nothing is routed. A verified
+delivery is ACKed (200) immediately, then handed to the same
+`install.route_webhook(event, payload, handler=, loop=, installer=)` mapping
+`compose()` already builds real collaborators for (`MergeTimeHandler` +
+`ConfigGatedWakeLoop` + `InstallHandler`) — the receiver adds no routing
+logic of its own. Redelivery is already harmless: `wake.claim_event`'s
+`(issue, stage, head_sha)` dedup (S16) is the idempotency layer routed calls
+land on.
+
+Dev loop with no public URL yet: tunnel a local `serve` with
+[smee.io](https://smee.io) (`npx smee-client --url <channel> --target
+http://localhost:8080/webhook`) or `ngrok http 8080`, and point the GitHub
+App's webhook URL at the tunnel's public address while iterating.
 
 ### One-time GitHub App registration (S23)
 

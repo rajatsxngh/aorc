@@ -23,11 +23,13 @@ slots it references).
 from __future__ import annotations
 
 import argparse
+import functools
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import webhook
 from .coder import CoderStage
 from .config import AorcConfig, ConfigError, load_config
 from .credentials import CredentialBroker
@@ -36,20 +38,24 @@ from .driver import PipelineDriver
 from .escalation import BackoffLLMClient
 from .gitops import LocalGitOps
 from .harness import ContainerRuntime, WorktreeManager
-from .install import ConfigGatedWakeLoop, InstallHandler
+from .install import ConfigGatedWakeLoop, InstallHandler, route_webhook
 from .interfaces import GitHubClient, LLMClient
 from .llm import build_llm_client
+from .merge import MergeTimeHandler
 from .reviewer import ReviewerStage
 from .tester import SubprocessTestRunner, TesterStage
 
 DEFAULT_CONFIG_PATH = ".aorc.yml"
 DEFAULT_WORKTREES_DIR = ".aorc-worktrees"
+DEFAULT_SERVE_HOST = "0.0.0.0"
+DEFAULT_SERVE_PORT = 8080
 
 GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 REPO_ENV = "AORC_REPO"
 BASE_IMAGE_ENV = "AORC_BASE_IMAGE"
 APP_ID_ENV = "AORC_GITHUB_APP_ID"
 APP_PRIVATE_KEY_PATH_ENV = "AORC_GITHUB_APP_PRIVATE_KEY_PATH"
+WEBHOOK_SECRET_ENV = "AORC_WEBHOOK_SECRET"
 
 
 class StartupError(Exception):
@@ -88,6 +94,7 @@ class Collaborators:
     loop: ConfigGatedWakeLoop
     installer: InstallHandler
     driver: PipelineDriver | None = None
+    merge_handler: MergeTimeHandler | None = None
 
     @property
     def github(self) -> GitHubClient:
@@ -104,6 +111,7 @@ def compose(
     broker: CredentialBroker | None = None,
     llm: LLMClient | None = None,
     driver: PipelineDriver | None = None,
+    merge_handler: MergeTimeHandler | None = None,
     repo_dir: str = ".",
     worktrees_dir: str = DEFAULT_WORKTREES_DIR,
     base_image: str | None = None,
@@ -174,6 +182,12 @@ def compose(
         concurrency=config.dispatch_concurrency,
     )
     installer = InstallHandler(loop)
+    # Reused below for MergeTimeHandler's stale-PR re-review (S17); stay None
+    # when the build pipeline itself isn't configured yet (same gate as the
+    # driver -- there can be no AORC-opened PRs to re-review without one).
+    coder_stage = None
+    reviewer_stage = None
+    test_runner = None
     if driver is None and config.setup and config.test:
         # S22: only buildable once `.aorc.yml`'s required build fields are
         # known (guarded the same way `config.build_blockers` gates the
@@ -196,29 +210,47 @@ def compose(
             test_command=config.test,
             lint_command=config.lint,
         )
+        reviewer_stage = ReviewerStage(
+            critic_llm,
+            coder_stage,
+            loop.github,
+            test_runner,
+            coverage_command=config.coverage_command,
+            coverage_floor=config.coverage_floor,
+            # No `smoke_command` template exists in `.aorc.yml`'s schema
+            # today (only the `smoke:` examples list) -- the smoke gate
+            # stays skipped live until that config field exists, exactly
+            # as documented in `install.py`'s config-PR template.
+            smoke_examples=config.smoke,
+            gitops=LocalGitOps(repo_dir),
+        )
         driver = PipelineDriver(
             loop.github,
             worktrees,
             DesignStage(llm, loop.github),
             TesterStage(llm, critic_llm, loop.github, test_runner, test_command=config.test),
             coder_stage,
-            ReviewerStage(
-                critic_llm,
-                coder_stage,
-                loop.github,
-                test_runner,
-                coverage_command=config.coverage_command,
-                coverage_floor=config.coverage_floor,
-                # No `smoke_command` template exists in `.aorc.yml`'s schema
-                # today (only the `smoke:` examples list) -- the smoke gate
-                # stays skipped live until that config field exists, exactly
-                # as documented in `install.py`'s config-PR template.
-                smoke_examples=config.smoke,
-                gitops=LocalGitOps(repo_dir),
-            ),
+            reviewer_stage,
         )
     loop.driver = driver
-    return Collaborators(llm=llm, loop=loop, installer=installer, driver=driver)
+    if merge_handler is None:
+        # S24 wiring: the webhook receiver's `route_webhook` call needs a
+        # real `MergeTimeHandler` to route pr-merged/pr-comment/rollback
+        # deliveries into. Built here (not by S17/S18, which only defined
+        # the class) since this is the first place a live MergeTimeHandler
+        # is actually composed.
+        merge_handler = MergeTimeHandler(
+            loop,
+            LocalGitOps(repo_dir),
+            coder=coder_stage,
+            reviewer=reviewer_stage,
+            test_runner=test_runner,
+            test_command=config.test if test_runner is not None else None,
+            feedback_llm=llm,
+        )
+    return Collaborators(
+        llm=llm, loop=loop, installer=installer, driver=driver, merge_handler=merge_handler
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -249,6 +281,15 @@ def build_argparser() -> argparse.ArgumentParser:
     sub.add_parser("wake", help="one cron tick: held-queue sweep + token-expiry pass")
     run_issue = sub.add_parser("run-issue", help="dispatch a single actionable issue")
     run_issue.add_argument("issue_number", type=int)
+    serve = sub.add_parser(
+        "serve",
+        help=(
+            "run the webhook receiver: HMAC-verified GitHub deliveries routed through "
+            f"route_webhook (needs ${WEBHOOK_SECRET_ENV})"
+        ),
+    )
+    serve.add_argument("--host", default=DEFAULT_SERVE_HOST)
+    serve.add_argument("--port", type=int, default=DEFAULT_SERVE_PORT)
     return parser
 
 
@@ -290,6 +331,23 @@ def run(argv: list[str] | None = None, *, collaborators: Collaborators | None = 
             print(f"dispatched issue #{args.issue_number}")
         else:
             print(f"parked issue #{args.issue_number} (awaiting-config)")
+    elif args.command == "serve":
+        # Read once, here, at the composition root -- never logged, never
+        # threaded further than this local variable (invariant #2).
+        try:
+            secret = _require_env(WEBHOOK_SECRET_ENV)
+        except StartupError as exc:
+            print(f"aorc: {exc}", file=sys.stderr)
+            return 1
+        route = functools.partial(
+            route_webhook,
+            handler=collaborators.merge_handler,
+            loop=loop,
+            installer=collaborators.installer,
+        )
+        server = webhook.serve(secret, route, host=args.host, port=args.port)
+        print(f"serve: listening on {args.host}:{args.port}")
+        server.serve_forever()
     return 0
 
 

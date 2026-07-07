@@ -21,6 +21,7 @@ from aorc.harness import MockContainerRuntime
 from aorc.install import ConfigGatedWakeLoop, InstallHandler
 from aorc.interfaces import Issue
 from aorc.llm.mock import MockLLMClient
+from aorc.merge import MergeTimeHandler, MockGitOps
 
 VALID_CONFIG = """
 llm:
@@ -61,7 +62,10 @@ def make_collaborators(issues=None, *, llm=None) -> Collaborators:
         repo="acme/widget",
         llm=llm or MockLLMClient(default="actionable"),
     )
-    return Collaborators(llm=llm, loop=loop, installer=InstallHandler(loop))
+    merge_handler = MergeTimeHandler(loop, MockGitOps())
+    return Collaborators(
+        llm=llm, loop=loop, installer=InstallHandler(loop), merge_handler=merge_handler
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -247,6 +251,59 @@ def test_compose_uses_a_driver_override_as_is():
     )
     assert collaborators.driver is sentinel
     assert collaborators.loop.driver is sentinel
+
+
+def test_compose_builds_a_merge_handler_by_default():
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+    )
+    assert isinstance(collaborators.merge_handler, MergeTimeHandler)
+
+
+def test_compose_uses_a_merge_handler_override_as_is():
+    sentinel = object()
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+        merge_handler=sentinel,
+    )
+    assert collaborators.merge_handler is sentinel
+
+
+def test_compose_builds_merge_handler_without_stale_pr_wiring_when_unconfigured():
+    # No setup/test -- same gate the driver stays None under. The merge
+    # handler must still build (issue-close-on-merge needs no build
+    # pipeline), just without stale-PR re-review capability.
+    config = parse_config({"llm": {"primary": {"provider": "claude", "model": "m"}}})
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+    )
+    assert isinstance(collaborators.merge_handler, MergeTimeHandler)
+    assert collaborators.merge_handler._reviewer is None
+    assert collaborators.merge_handler._test_command is None
 
 
 def test_pat_passthrough_minter_returns_fixed_token_regardless_of_args():
@@ -436,3 +493,82 @@ def test_run_issue_gate_closed_reports_parked_not_dispatched(capsys):
     assert code == 0
     assert "dispatched" not in out
     assert "parked issue #9 (awaiting-config)" in out
+
+
+# --------------------------------------------------------------------------- #
+# S24: `serve` subcommand -- webhook secret fail-closed + wiring to webhook.serve
+# --------------------------------------------------------------------------- #
+
+
+def test_serve_subcommand_fails_closed_without_webhook_secret(monkeypatch, capsys):
+    from aorc.__main__ import WEBHOOK_SECRET_ENV
+
+    monkeypatch.delenv(WEBHOOK_SECRET_ENV, raising=False)
+    collaborators = make_collaborators()
+
+    code = run(["serve"], collaborators=collaborators)
+
+    assert code == 1
+    assert WEBHOOK_SECRET_ENV in capsys.readouterr().err
+
+
+def test_serve_subcommand_wires_the_receiver_and_never_logs_the_secret(monkeypatch, capsys):
+    import aorc.__main__ as main_module
+
+    monkeypatch.setenv(main_module.WEBHOOK_SECRET_ENV, "s3kr1t-value")
+    collaborators = make_collaborators()
+    captured = {}
+
+    class FakeServer:
+        def serve_forever(self):
+            captured["served"] = True
+
+    def fake_serve(secret, route, *, host, port):
+        captured["secret"] = secret
+        captured["host"] = host
+        captured["port"] = port
+        captured["route"] = route
+        return FakeServer()
+
+    monkeypatch.setattr(main_module.webhook, "serve", fake_serve)
+
+    code = run(["serve"], collaborators=collaborators)
+    out, err = capsys.readouterr()
+
+    assert code == 0
+    assert captured["secret"] == "s3kr1t-value"
+    assert captured["host"] == main_module.DEFAULT_SERVE_HOST
+    assert captured["port"] == main_module.DEFAULT_SERVE_PORT
+    assert captured["served"] is True
+    assert "serve: listening" in out
+    assert "s3kr1t-value" not in out
+    assert "s3kr1t-value" not in err
+
+    route = captured["route"]
+    assert route.keywords["handler"] is collaborators.merge_handler
+    assert route.keywords["loop"] is collaborators.loop
+    assert route.keywords["installer"] is collaborators.installer
+
+
+def test_serve_subcommand_accepts_host_and_port_flags(monkeypatch):
+    import aorc.__main__ as main_module
+
+    monkeypatch.setenv(main_module.WEBHOOK_SECRET_ENV, "s3kr1t")
+    collaborators = make_collaborators()
+    captured = {}
+
+    class FakeServer:
+        def serve_forever(self):
+            pass
+
+    def fake_serve(secret, route, *, host, port):
+        captured["host"] = host
+        captured["port"] = port
+        return FakeServer()
+
+    monkeypatch.setattr(main_module.webhook, "serve", fake_serve)
+
+    code = run(["serve", "--host", "127.0.0.1", "--port", "9090"], collaborators=collaborators)
+
+    assert code == 0
+    assert captured == {"host": "127.0.0.1", "port": 9090}
