@@ -99,3 +99,70 @@ def test_commit_file_then_readable_via_get_file():
 
     assert gh.get_file("aorc/issue-1/design.md", "aorc/issue-1") == "content"
     assert ("commit_file", "aorc/issue-1", "aorc/issue-1/design.md", "design: #1") in gh.calls
+
+
+# ---- S28: forbidden board creation degrades to label-only ------------------ #
+# Live rung-1 finding: fine-grained PATs can't create Projects v2 (GraphQL
+# createProjectV2 -> 400 FORBIDDEN "Resource not accessible by personal access
+# token"). The board is a derived, display-only projection of the labels (S2),
+# so that refusal must degrade to label-only operation, never crash.
+
+class _FakeForbidden(Exception):
+    """Duck-types PyGithub's GithubException for the auth-refusal shape,
+    keeping the unit suite free of third-party imports."""
+
+    status = 400
+    data = {
+        "errors": [
+            {
+                "type": "FORBIDDEN",
+                "message": "Resource not accessible by personal access token",
+            }
+        ]
+    }
+
+
+def _forbidden_sdk_client():
+    from aorc.github.sdk_adapter import SdkGitHubClient
+
+    client = SdkGitHubClient(token="t", repo="owner/repo")
+
+    def refuse(query, variables):
+        raise _FakeForbidden("400 FORBIDDEN")
+
+    client._graphql = refuse
+    return client
+
+
+def test_forbidden_create_board_degrades_to_label_only(caplog):
+    client = _forbidden_sdk_client()
+
+    client.create_board(["Todo", "In progress", "Done"])  # must not raise
+
+    assert any(
+        "labels only" in record.getMessage() for record in caplog.records
+    ), "degrade must be logged as board unavailable / proceeding with labels only"
+    # Degraded client: board ops are the existing project=None no-ops.
+    assert client.get_board_column(1) is None
+    client.set_board_column(1, "Todo")  # no-op, no GraphQL call
+
+
+def test_non_auth_create_board_error_still_raises():
+    from aorc.github.sdk_adapter import SdkGitHubClient
+
+    client = SdkGitHubClient(token="t", repo="owner/repo")
+
+    class Boom(Exception):
+        pass
+
+    def explode(query, variables):
+        raise Boom("network down")
+
+    client._graphql = explode
+
+    try:
+        client.create_board(["Todo"])
+    except Boom:
+        pass
+    else:
+        raise AssertionError("non-auth errors must propagate unchanged")

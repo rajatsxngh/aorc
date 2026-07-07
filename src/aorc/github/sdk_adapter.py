@@ -10,7 +10,25 @@ uses `MockGitHubClient`).
 
 from __future__ import annotations
 
+import logging
+
 from ..interfaces import Comment, GitHubClient, Issue, PullRequest
+
+logger = logging.getLogger(__name__)
+
+
+def _is_board_auth_error(exc: Exception) -> bool:
+    """True when a Projects v2 call was refused by GitHub's token policy
+    rather than failing for a real reason. Fine-grained PATs cannot create
+    Projects v2 at all — the GraphQL API answers 400 with a FORBIDDEN error
+    ("Resource not accessible by personal access token"); plain 401/403 auth
+    failures count too. Checked structurally (status/data attributes, the
+    shape `GithubException` carries) so callers need no SDK import."""
+    status = getattr(exc, "status", None)
+    if status in (401, 403):
+        return True
+    blob = f"{getattr(exc, 'data', '')} {exc}"
+    return "FORBIDDEN" in blob or "Resource not accessible" in blob
 
 # --- Projects v2 (GraphQL) --------------------------------------------------- #
 # Classic Projects (columns/cards) were sunset by GitHub; the live board API is
@@ -303,7 +321,26 @@ class SdkGitHubClient(GitHubClient):
         status field to exactly `columns`. New Projects v2 projects ship with
         a default "Status" field, so the option set is *updated*, never a
         second field created. Covered (opt-in, it creates a real project) by
-        the S19 integration suite."""
+        the S19 integration suite.
+
+        The board is a derived, display-only projection of the labels (S2), so
+        a token that can't create Projects v2 (fine-grained PATs never can —
+        GraphQL answers FORBIDDEN) degrades to label-only operation instead of
+        crashing the install (S28): logged once, project left unset so every
+        later board op is the existing no-op."""
+        try:
+            self._create_board(columns)
+        except Exception as e:
+            if not _is_board_auth_error(e):
+                raise
+            self._project = None
+            logger.warning(
+                "Projects board not available with this token (%s); "
+                "board unavailable — proceeding with labels only",
+                e,
+            )
+
+    def _create_board(self, columns: list[str]) -> None:
         owner = (self._project or {}).get("owner") or self._repo_name.split("/", 1)[0]
         field_name = (self._project or {}).get("status_field", "Status")
         if self._project is None:
