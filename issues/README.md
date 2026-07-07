@@ -53,6 +53,29 @@ S2 + S17 →
 | S17 | Merge-time + auto-rollback | S8, S10 | 52–54 (B16–B18, B22, safety 9) |
 | S18 | GitHub App install | S2, S17 | 1–3, 5, 6 (B23, B27) |
 
+## v1.5 — go-live glue (open, from the post-S19 full-system readiness review)
+
+All v1 components are built and unit-tested, but AORC cannot run live: no
+entry point, no build-stage driver, no real token minter, no webhook
+receiver, no executed Actions surface. S21 + S22 unblock the rest.
+
+```
+S21 composition root / entry point               ← unblocks everything live
+└─ S22 pipeline driver + worktree/API split-brain fix
+    ├─ S23 real token minter (App-JWT → installation token)
+    ├─ S24 webhook receiver + HMAC verification
+    └─ S23 + S24 →
+        └─ S25 real GitHub Actions execution wiring
+```
+
+| # | Slice | Blocked by |
+|---|---|---|
+| S21 | Composition root / entry point | — |
+| S22 | Pipeline driver + split-brain fix | S21 |
+| S23 | Real token minter | S21, S22 |
+| S24 | Webhook receiver + HMAC | S21, S22 |
+| S25 | Actions execution wiring | S21–S24 |
+
 ## Known open limitation (post-v1)
 
 A container holding its per-issue `GITHUB_TOKEN` can push or call the API
