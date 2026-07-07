@@ -36,15 +36,15 @@ label-only operation, not crash the install.
 
 ## Acceptance criteria
 
-- [ ] `create_board` hitting FORBIDDEN (or any auth error) is caught and
+- [x] `create_board` hitting FORBIDDEN (or any auth error) is caught and
       logged as "board unavailable — proceeding with labels only"; it never
       propagates a crash out of install/backfill
-- [ ] After the degrade, board ops on the same client are no-ops (label flow
+- [x] After the degrade, board ops on the same client are no-ops (label flow
       continues untouched)
-- [ ] A unit test proves a forbidden `create_board` degrades gracefully —
+- [x] A unit test proves a forbidden `create_board` degrades gracefully —
       no crash, label operations still work — with zero third-party deps
       (fake exception through the `_graphql` seam, no PyGithub import)
-- [ ] A non-auth `_graphql` failure still raises unchanged
+- [x] A non-auth `_graphql` failure still raises unchanged
 
 ## Blocked by
 
