@@ -27,6 +27,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from .design import DesignDoc
+from .harness import write_worktree_file
 from .interfaces import GitHubClient, LLMClient, Message
 from .pipeline import branch_name
 
@@ -255,6 +256,9 @@ class TesterStage:
                 continue  # off-spec (or critic format miss) -- retry the tester
 
             self._commit(issue_number, doc.code)
+            # S22 split-brain fix: same ordering pin as `CoderStage` -- mirror
+            # the committed test source into `cwd` before the toolchain runs.
+            write_worktree_file(cwd, generated_test_path(issue_number), doc.code)
             run_result = self._test_runner.run(cwd, self._test_command)
             if classify_test_run(run_result) == "red":
                 return TesterResult(status="proceed", code=doc.code, attempts=attempts)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from aorc.coder import (
     CoderStage as Stage,
@@ -230,3 +231,63 @@ def test_provider_error_exhausts_to_agent_blocked_without_touching_real_ladder()
     assert result.status == "agent-blocked"
     assert result.attempts == 0  # no real (non-provider) attempt ever ran
     assert len(runner.calls) == 0
+
+
+# ---- S22 split-brain fix: commit -> sync -> run, per attempt -------------- #
+
+
+class _ReadsFileTestRunner:
+    """Records the on-disk content of the just-committed file *at the moment
+    the toolchain runs* -- pins that the write lands before the run, not
+    just eventually. `MockTestRunner` can't prove this: it never touches the
+    filesystem."""
+
+    def __init__(self, path: str, results=None) -> None:
+        self._path = path
+        self._results = list(results or [])
+        self.seen_content: list[str | None] = []
+        self.calls: list[tuple[str, str]] = []
+
+    def run(self, cwd: str, command: str) -> RunResult:
+        self.calls.append((cwd, command))
+        full_path = os.path.join(cwd, self._path)
+        self.seen_content.append(
+            open(full_path).read() if os.path.exists(full_path) else None
+        )
+        return self._results.pop(0) if self._results else RunResult(returncode=0)
+
+
+def test_committed_code_is_visible_to_the_toolchain_before_it_runs(tmp_path):
+    runner = _ReadsFileTestRunner("src/aorc/add.py")
+    llm = MockLLMClient(responses=[_ONE_TASK])
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    stage = Stage(llm, gh, runner)
+
+    result = stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    assert result.status == "proceed"
+    # The toolchain's very first (and only) run already saw the committed
+    # content -- proves commit -> sync -> run ordering, not commit -> run.
+    assert runner.seen_content == ["def add(a, b):\n    return a + b\n"]
+
+
+def test_worktree_sync_happens_again_on_every_fix_loop_attempt(tmp_path):
+    runner = _ReadsFileTestRunner(
+        "src/aorc/add.py",
+        results=[RunResult(returncode=1, stdout="AssertionError"), RunResult(returncode=0)],
+    )
+    second_task = json.dumps(
+        {"tasks": [{"task": "implement add()", "path": "src/aorc/add.py", "code": "def add(a, b):\n    return a - b  # fixed\n"}]}
+    )
+    llm = MockLLMClient(responses=[_ONE_TASK, second_task])
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    stage = Stage(llm, gh, runner)
+
+    result = stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    assert result.status == "proceed"
+    assert result.attempts == 2
+    assert runner.seen_content == [
+        "def add(a, b):\n    return a + b\n",
+        "def add(a, b):\n    return a - b  # fixed\n",
+    ]

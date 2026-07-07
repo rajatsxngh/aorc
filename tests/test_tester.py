@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from aorc.design import DesignDoc
 from aorc.github.mock import MockGitHubClient
@@ -200,3 +201,35 @@ def test_error_result_retries_then_agent_blocked():
     assert result.status == "agent-blocked"
     assert result.attempts == 2
     assert len(runner.calls) == 2
+
+
+# ---- S22 split-brain fix: commit -> sync -> run ---------------------------- #
+
+
+class _ReadsFileTestRunner:
+    """Same pin as `test_coder.py`'s -- records the on-disk content of the
+    just-committed generated test file at the moment the toolchain runs."""
+
+    def __init__(self, path: str, results=None) -> None:
+        self._path = path
+        self._results = list(results or [])
+        self.seen_content: list[str | None] = []
+
+    def run(self, cwd: str, command: str) -> RunResult:
+        full_path = os.path.join(cwd, self._path)
+        self.seen_content.append(
+            open(full_path).read() if os.path.exists(full_path) else None
+        )
+        return self._results.pop(0) if self._results else RunResult(returncode=0)
+
+
+def test_committed_test_file_is_visible_to_the_toolchain_before_it_runs(tmp_path):
+    runner = _ReadsFileTestRunner(
+        generated_test_path(1), results=[RunResult(returncode=1, stdout="AssertionError")]
+    )
+    stage = Stage(MockLLMClient(responses=[_ONE_TEST]), MockLLMClient(responses=[_APPROVE]), MockGitHubClient(issues=[Issue(number=1)]), runner)
+
+    result = stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    assert result.status == "proceed"
+    assert runner.seen_content == ["def test_add():\n    assert add(1, 2) == 3\n"]

@@ -346,6 +346,40 @@ def test_wake_loop_dispatch_env_is_broker_built():
 
 
 # --------------------------------------------------------------------------- #
+# S22: dispatch_issue runs the configured build-pipeline driver
+# --------------------------------------------------------------------------- #
+
+
+class RecordingDriver:
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def run(self, issue_number: int, **kwargs) -> None:
+        self.calls.append(issue_number)
+
+
+def test_dispatch_issue_has_no_driver_by_default():
+    """Every hand-assembled/test loop reproduces the exact pre-S22
+    behavior: mint + start a container, nothing else."""
+    loop, gh, runtime, minter, clock = make_loop(issues=[Issue(number=5, body="x")])
+
+    loop.dispatch_issue(5)
+
+    assert loop.driver is None
+    assert ("start", 5, branch_name(5)) in runtime.calls
+
+
+def test_dispatch_issue_runs_a_configured_driver():
+    loop, gh, runtime, minter, clock = make_loop(issues=[Issue(number=5, body="x")])
+    driver = RecordingDriver()
+    loop.driver = driver
+
+    loop.dispatch_issue(5)
+
+    assert driver.calls == [5]
+
+
+# --------------------------------------------------------------------------- #
 # S15 wiring: composition root wraps the client in ScrubbingGitHubClient once
 # --------------------------------------------------------------------------- #
 

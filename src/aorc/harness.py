@@ -210,6 +210,33 @@ class WorktreeManager:
         return path
 
 
+def write_worktree_file(cwd: str, path: str, content: str) -> None:
+    """S22 split-brain fix: mirrors a `GitHubClient.commit_file` write into
+    the local worktree, using the exact bytes just committed, so the very
+    next `TestRunner.run(cwd, ...)` sees it. `GitHubClient` has no
+    fetch/pull surface (it is a content API, not a git-plumbing seam), and a
+    real fetch would only work against a live remote anyway -- not
+    `MockGitHubClient`'s in-memory store. Since the caller already holds the
+    committed content, writing it straight to `cwd` keeps the toolchain's
+    view in sync with what the pipeline believes is committed without
+    depending on git-remote semantics at all.
+
+    `cwd == "."` is `CoderStage.run`/`TesterStage.run`'s own default when no
+    real worktree was ever supplied -- true of most of the unit suite, which
+    drives these stages with `MockTestRunner` and never reads the
+    filesystem. Skip the write in that case rather than mirroring test
+    content into whatever directory the process happens to be running
+    from -- a real dispatch always passes `WorktreeManager.ensure(...)`'s
+    absolute path, never `"."`.
+    """
+    if cwd == ".":
+        return
+    full_path = os.path.join(cwd, path)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    with open(full_path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+
+
 class InFlightRegistry:
     """Tracks each dispatched issue's claimed file list as reported at its
     checkpoint, so collision logic can ask "what files are claimed by

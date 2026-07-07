@@ -28,6 +28,7 @@ import json
 from dataclasses import dataclass, field
 
 from .design import DesignDoc
+from .harness import write_worktree_file
 from .interfaces import GitHubClient, LLMClient, Message, ProviderError
 from .pipeline import branch_name
 from .tester import TestRunner, TestRunResult, generated_test_path
@@ -185,6 +186,11 @@ class CoderStage:
 
             for entry in doc.tasks:
                 self._commit(issue_number, entry["path"], entry["code"])
+                # S22 split-brain fix: mirror the just-committed content into
+                # the worktree `cwd` the toolchain is about to run in -- see
+                # `harness.write_worktree_file`. Must happen before
+                # `_run_toolchain`, not after: that's the whole bug.
+                write_worktree_file(cwd, entry["path"], entry["code"])
                 repo_files[entry["path"]] = entry["code"]
 
             run_result = self._run_toolchain(cwd)

@@ -193,6 +193,62 @@ def test_compose_wraps_github_client_exactly_once():
     assert collaborators.github._inner is gh
 
 
+def test_compose_attaches_a_pipeline_driver_when_setup_and_test_are_configured():
+    from aorc.driver import PipelineDriver
+
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+    )
+    assert isinstance(collaborators.driver, PipelineDriver)
+    assert collaborators.loop.driver is collaborators.driver
+
+
+def test_compose_leaves_driver_none_without_setup_and_test_configured():
+    # No `setup`/`test` -- same fields `config.build_blockers` gates the
+    # rest of the build pipeline on. `compose()` also runs for `install`,
+    # before any real `.aorc.yml` may exist yet, so this must not crash.
+    config = parse_config({"llm": {"primary": {"provider": "claude", "model": "m"}}})
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+    )
+    assert collaborators.driver is None
+    assert collaborators.loop.driver is None
+
+
+def test_compose_uses_a_driver_override_as_is():
+    sentinel = object()
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+        driver=sentinel,
+    )
+    assert collaborators.driver is sentinel
+    assert collaborators.loop.driver is sentinel
+
+
 def test_pat_passthrough_minter_returns_fixed_token_regardless_of_args():
     minter = pat_passthrough_minter("ghs_fixedtoken" + "a" * 20)
     t1 = minter("any-private-key", "acme/widget", {"contents": "write"})

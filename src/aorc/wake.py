@@ -45,7 +45,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from .credentials import (
     CredentialBroker,
@@ -63,6 +63,11 @@ from .pipeline import (
     current_pipeline_label,
 )
 from .triage import triage
+
+if TYPE_CHECKING:  # annotation only -- driver.py imports several stage
+    # modules that don't need to be a hard runtime dependency of every
+    # WakeLoop user (e.g. the zero-dep unit suite building a bare loop).
+    from .driver import PipelineDriver
 
 _BRANCH_RE = re.compile(r"^aorc/issue-(\d+)$")
 
@@ -199,6 +204,12 @@ class WakeLoop:
         self._clock = clock
         # issue -> (handle, token): live runtime objects, not pipeline state.
         self.in_flight: dict[int, tuple[ContainerHandle, IssueToken]] = {}
+        # S22: optional build-pipeline driver, set post-construction by the
+        # composition root once `.aorc.yml`'s setup/test commands are known.
+        # `None` here (the default for every hand-assembled/test loop)
+        # reproduces the pre-S22 behavior exactly -- dispatch only mints a
+        # token and starts a container.
+        self.driver: "PipelineDriver | None" = None
 
     @classmethod
     def compose(
@@ -310,11 +321,20 @@ class WakeLoop:
 
     def dispatch_issue(self, issue_number: int) -> ContainerHandle:
         """The only dispatch path: mint -> broker-built env -> harness. No
-        hand-built env dict exists anywhere in the loop."""
+        hand-built env dict exists anywhere in the loop.
+
+        S22: if a `driver` is configured, it runs the actual
+        design/test/code/review sequence right here, orchestrator-side --
+        the container the harness just started runs no command of its own
+        (known limitation, `issues/README.md`). `driver` is `None` for every
+        loop that doesn't set it, which reproduces the exact pre-S22
+        behavior (mint + start, nothing else)."""
         token = self._broker.mint(issue_number, self._repo)
         env = self._broker.container_env(token)
         handle = self.harness.dispatch(issue_number, env)
         self.in_flight[issue_number] = (handle, token)
+        if self.driver is not None:
+            self.driver.run(issue_number)
         return handle
 
     def hold(self, issue_number: int) -> None:

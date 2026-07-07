@@ -27,13 +27,19 @@ import os
 import sys
 from dataclasses import dataclass
 
+from .coder import CoderStage
 from .config import AorcConfig, ConfigError, load_config
 from .credentials import CredentialBroker
+from .design import DesignStage
+from .driver import PipelineDriver
 from .escalation import BackoffLLMClient
+from .gitops import LocalGitOps
 from .harness import ContainerRuntime, WorktreeManager
 from .install import ConfigGatedWakeLoop, InstallHandler
 from .interfaces import GitHubClient, LLMClient
 from .llm import build_llm_client
+from .reviewer import ReviewerStage
+from .tester import SubprocessTestRunner, TesterStage
 
 DEFAULT_CONFIG_PATH = ".aorc.yml"
 DEFAULT_WORKTREES_DIR = ".aorc-worktrees"
@@ -78,6 +84,7 @@ class Collaborators:
     llm: LLMClient | None
     loop: ConfigGatedWakeLoop
     installer: InstallHandler
+    driver: PipelineDriver | None = None
 
     @property
     def github(self) -> GitHubClient:
@@ -93,6 +100,7 @@ def compose(
     worktrees: WorktreeManager | None = None,
     broker: CredentialBroker | None = None,
     llm: LLMClient | None = None,
+    driver: PipelineDriver | None = None,
     repo_dir: str = ".",
     worktrees_dir: str = DEFAULT_WORKTREES_DIR,
     base_image: str | None = None,
@@ -146,7 +154,51 @@ def compose(
         concurrency=config.dispatch_concurrency,
     )
     installer = InstallHandler(loop)
-    return Collaborators(llm=llm, loop=loop, installer=installer)
+    if driver is None and config.setup and config.test:
+        # S22: only buildable once `.aorc.yml`'s required build fields are
+        # known (guarded the same way `config.build_blockers` gates the
+        # rest of the build pipeline) -- `compose()` also runs for
+        # `install`, before any real `.aorc.yml` may exist yet, when this
+        # simply stays `None`. `ConfigGatedWakeLoop.dispatch_issue` already
+        # never runs while the gate is closed, so a `None` driver here never
+        # actually gets called with a real setup/test command missing.
+        critic_llm = (
+            BackoffLLMClient(build_llm_client(config.escalation))
+            if config.escalation is not None
+            else llm
+        )
+        test_runner = SubprocessTestRunner()
+        coder_stage = CoderStage(
+            llm,
+            loop.github,
+            test_runner,
+            setup_command=config.setup,
+            test_command=config.test,
+            lint_command=config.lint,
+        )
+        driver = PipelineDriver(
+            loop.github,
+            worktrees,
+            DesignStage(llm, loop.github),
+            TesterStage(llm, critic_llm, loop.github, test_runner, test_command=config.test),
+            coder_stage,
+            ReviewerStage(
+                critic_llm,
+                coder_stage,
+                loop.github,
+                test_runner,
+                coverage_command=config.coverage_command,
+                coverage_floor=config.coverage_floor,
+                # No `smoke_command` template exists in `.aorc.yml`'s schema
+                # today (only the `smoke:` examples list) -- the smoke gate
+                # stays skipped live until that config field exists, exactly
+                # as documented in `install.py`'s config-PR template.
+                smoke_examples=config.smoke,
+                gitops=LocalGitOps(repo_dir),
+            ),
+        )
+    loop.driver = driver
+    return Collaborators(llm=llm, loop=loop, installer=installer, driver=driver)
 
 
 # --------------------------------------------------------------------------- #
