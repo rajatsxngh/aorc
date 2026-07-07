@@ -309,3 +309,17 @@ def test_run_issue_without_config_parks_under_awaiting_config():
     assert code == 0
     assert "awaiting-config" in collaborators.github.get_labels(9)
     assert collaborators.loop.harness._runtime.calls == []
+
+
+def test_run_issue_gate_closed_reports_parked_not_dispatched(capsys):
+    """`ConfigGatedWakeLoop.dispatch_issue` returns None when the config
+    gate is closed (issue parked under awaiting-config, no container
+    started) -- the CLI must not claim a dispatch happened."""
+    collaborators = make_collaborators(
+        issues=[Issue(number=9, title="Do a thing", body="x", labels=[])]
+    )
+    code = run(["run-issue", "9"], collaborators=collaborators)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "dispatched" not in out
+    assert "parked issue #9 (awaiting-config)" in out

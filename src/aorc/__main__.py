@@ -253,8 +253,14 @@ def run(argv: list[str] | None = None, *, collaborators: Collaborators | None = 
         report = loop.cron_tick()
         print(f"wake: released={report.released} requeued={report.requeued}")
     elif args.command == "run-issue":
-        loop.dispatch_issue(args.issue_number)
-        print(f"dispatched issue #{args.issue_number}")
+        # `ConfigGatedWakeLoop.dispatch_issue` returns None when the config
+        # gate is closed: the issue was parked under awaiting-config and no
+        # container was started, so don't claim otherwise.
+        handle = loop.dispatch_issue(args.issue_number)
+        if handle is not None:
+            print(f"dispatched issue #{args.issue_number}")
+        else:
+            print(f"parked issue #{args.issue_number} (awaiting-config)")
     return 0
 
 
