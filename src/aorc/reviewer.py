@@ -43,16 +43,23 @@ import difflib
 import json
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .coder import CoderStage
 from .design import DesignDoc
+from .guards import BLOCKED_LABEL
 from .interfaces import GitHubClient, LLMClient, Message, PullRequest
-from .pipeline import branch_name
+from .pipeline import LABEL_COLUMN, branch_name
 from .tester import TestRunner
+
+if TYPE_CHECKING:  # annotation only -- merge.py imports this module at runtime
+    from .merge import GitOps
 
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_COVERAGE_FLOOR = 80.0
 BASE_REF = "main"
+
+MERGE_CONFLICT_MARKER = "<!-- aorc:merge-conflict -->"
 
 _PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)%")
 
@@ -123,6 +130,7 @@ class ReviewerStage:
         coverage_floor: float = DEFAULT_COVERAGE_FLOOR,
         smoke_command: str | None = None,
         smoke_examples: list[dict] | None = None,
+        gitops: GitOps | None = None,
     ) -> None:
         self._reviewer_llm = reviewer_llm
         self._coder = coder
@@ -133,6 +141,7 @@ class ReviewerStage:
         self._coverage_floor = coverage_floor
         self._smoke_command = smoke_command
         self._smoke_examples = list(smoke_examples or [])
+        self._gitops = gitops
 
     def run(
         self,
@@ -141,7 +150,12 @@ class ReviewerStage:
         issue_body: str,
         *,
         cwd: str = ".",
+        pr: PullRequest | None = None,
     ) -> ReviewerResult:
+        """With `pr` given (S17 stale-PR re-review), the gates and reviewer
+        run against the existing PR -- no new PR is opened, the attempt trail
+        is posted on it, and the caller owns any rebase (the PR-open rebase
+        check is skipped)."""
         history: list[str] = []
         attempts = 0
         while attempts < self._max_retries:
@@ -168,10 +182,34 @@ class ReviewerStage:
                     return ReviewerResult(status="agent-blocked", attempts=attempts)
                 continue
 
-            pr = self._open_pr(issue_number, design)
+            # Merge conflict at PR-open (S17, PRD B17): main may have moved
+            # while the pipeline ran. Clean rebase -> re-run every gate and
+            # the reviewer against the rebased result (bounded by the same
+            # attempt cap); true conflict -> agent-blocked, the coder never
+            # freelances a resolution. Mechanical discriminator: git says.
+            if pr is None and self._gitops is not None:
+                rebase = self._gitops.rebase(branch_name(issue_number), BASE_REF)
+                if rebase.status == "conflict":
+                    self._github.add_label(issue_number, BLOCKED_LABEL)
+                    self._github.set_board_column(issue_number, LABEL_COLUMN[BLOCKED_LABEL])
+                    self._github.post_comment(
+                        issue_number,
+                        f"{MERGE_CONFLICT_MARKER}\nStopping: true merge conflict "
+                        f"with {BASE_REF} at PR-open. Labeling `{BLOCKED_LABEL}` "
+                        "(reason: merge conflict with main).",
+                    )
+                    return ReviewerResult(status="agent-blocked", attempts=attempts)
+                if rebase.status == "clean":
+                    history.append(
+                        f"attempt {attempts}: clean rebase onto {BASE_REF} -- "
+                        "re-running gates + reviewer against the rebased result"
+                    )
+                    continue
+
+            opened = pr if pr is not None else self._open_pr(issue_number, design)
             for entry in history:
-                self._github.post_comment(pr.number, entry)
-            return ReviewerResult(status="proceed", pr=pr, attempts=attempts)
+                self._github.post_comment(opened.number, entry)
+            return ReviewerResult(status="proceed", pr=opened, attempts=attempts)
 
         return ReviewerResult(status="agent-blocked", attempts=attempts)
 

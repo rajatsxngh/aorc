@@ -31,6 +31,17 @@ plumbing: route agent pushes through an orchestrator-mediated path or a
 scrubbing egress proxy, and stop passing secrets as `docker run -e KEY=value`
 (visible in host `ps`; `DockerContainerRuntime.start` does this today).
 
+## Wiring obligation inherited from S17
+
+S17 introduced the `GitOps` seam (`merge.py`: rebase for PR-open/stale-PR
+handling, revert for auto-rollback) with **only `MockGitOps`** behind it — no
+real implementation exists. The real surface lands here: the push-to-main
+Actions workflow that detects a red main and performs the revert, plus real
+rebase execution against actual branches. Webhook wiring note: the full merge
+handler is `merge.MergeTimeHandler.on_pr_merged` / `.on_pr_comment` /
+`.on_main_broken` — not `WakeLoop.on_pr_merged` (the bare held-sweep), which
+the handler already calls internally.
+
 ## Blocked by
 
 - S2 (labels/board), S17 (full pipeline + push-to-main rollback behavior to wire webhooks against)

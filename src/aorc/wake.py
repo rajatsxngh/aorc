@@ -229,7 +229,13 @@ class WakeLoop:
         """Primary held-issue wake. Deduped by (issue, "pr-merged", head_sha)
         when the PR maps to an AORC issue; a human PR's merge has no issue to
         pin a marker on, but the sweep itself is naturally idempotent (a
-        released issue is no longer held, so a replay finds nothing to do)."""
+        released issue is no longer held, so a replay finds nothing to do).
+
+        This is the *bare* sweep entry point. The full merge webhook handler
+        is `merge.MergeTimeHandler.on_pr_merged` (S17): issue auto-close,
+        stale-PR re-check, then this sweep -- wire webhooks to that, not
+        here (it claims the same dedup key, so wiring both double-fires
+        nothing but skips the S17 behavior)."""
         pr = self.github.get_pull_request(pr_number)
         issue_number = issue_for_branch(pr.head)
         if issue_number is not None and not claim_event(
