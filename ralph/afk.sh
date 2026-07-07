@@ -42,7 +42,7 @@ for ((i=1; i<=$1; i++)); do
   printf '%s' "Previous commits: $commits Issues: $issues $prompt" \
     | claude \
         --print \
-        --model claude-fable-5 \
+        --model sonnet \
         --permission-mode acceptEdits \
         --allowedTools "Read,Edit,Write,Bash" \
     | tee "$tmpfile"
