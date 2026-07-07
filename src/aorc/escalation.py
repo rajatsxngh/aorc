@@ -356,6 +356,9 @@ class RateLimitedGitHubClient(GitHubClient):
         return self._call(lambda: self._inner.commit_file(branch, path, content, message))
 
     # ---- projects board -------------------------------------------------- #
+    def create_board(self, columns: list[str]) -> None:
+        return self._call(lambda: self._inner.create_board(columns))
+
     def set_board_column(self, issue_number: int, column: str) -> None:
         return self._call(lambda: self._inner.set_board_column(issue_number, column))
 

@@ -272,11 +272,14 @@ class WakeLoop:
         for issue in self.github.list_issues("open"):
             if issue.number in self.in_flight:
                 continue
-            if HELD_LABEL in issue.labels or current_pipeline_label(issue.labels):
+            if self._already_in_flow(issue):
                 continue  # already in the flow -- re-sync only adds what's missing
             report.triaged.append(issue.number)
-            if triage(issue, self._llm).status == "actionable":
+            result = triage(issue, self._llm)
+            if result.status == "actionable":
                 candidates.append(issue)
+            else:
+                self._route_not_ready(issue, result)
         decision = select_dispatch(
             candidates,
             self.github,
@@ -293,6 +296,17 @@ class WakeLoop:
         return report
 
     # ---- the pieces -------------------------------------------------------- #
+
+    def _route_not_ready(self, issue: Issue, result) -> None:
+        """Hook: what to do with a not-ready triage verdict during backfill.
+        The bare S16 loop leaves it in the backlog; S18's install-time loop
+        routes it onward (vague -> clarification, epic -> decomposition)."""
+
+    def _already_in_flow(self, issue: Issue) -> bool:
+        """An issue the backfill re-sync must not re-triage: held or carrying
+        a pipeline label. Subclasses widen this (S18's config-gated loop adds
+        the awaiting-config queue)."""
+        return HELD_LABEL in issue.labels or bool(current_pipeline_label(issue.labels))
 
     def dispatch_issue(self, issue_number: int) -> ContainerHandle:
         """The only dispatch path: mint -> broker-built env -> harness. No

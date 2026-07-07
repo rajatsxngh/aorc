@@ -30,6 +30,7 @@ class MockGitHubClient(GitHubClient):
         self.pulls: dict[int, PullRequest] = {p.number: p for p in (pulls or [])}
         self.comments: dict[int, list[Comment]] = {}
         self.board: dict[int, str] = {}
+        self.board_columns: list[str] | None = None
         self.created_labels: dict[str, dict] = {}
         self.files: dict[tuple[str, str], str] = {}  # (ref, path) -> content
         self.calls: list[tuple] = []
@@ -130,6 +131,11 @@ class MockGitHubClient(GitHubClient):
         self.files[(ref, path)] = content
 
     # ---- projects board -------------------------------------------------- #
+    def create_board(self, columns: list[str]) -> None:
+        self.calls.append(("create_board", list(columns)))
+        self.board_columns = list(columns)
+        self._project = _CONFIGURED  # an install-created board is configured
+
     def set_board_column(self, issue_number: int, column: str) -> None:
         if self._project is None:
             return  # unconfigured board: no-op, mirroring SdkGitHubClient

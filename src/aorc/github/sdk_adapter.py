@@ -80,6 +80,35 @@ mutation($project:ID!, $content:ID!) {
 }
 """
 
+_OWNER_ID_QUERY = """
+query($owner:String!) { repositoryOwner(login:$owner) { id } }
+"""
+
+_CREATE_PROJECT_MUTATION = """
+mutation($owner:ID!, $title:String!) {
+  createProjectV2(input:{ ownerId:$owner, title:$title }) {
+    projectV2 { id number }
+  }
+}
+"""
+
+_PROJECT_STATUS_FIELD_QUERY = """
+query($project:ID!, $field:String!) {
+  node(id:$project) {
+    ... on ProjectV2 { field(name:$field) {
+      ... on ProjectV2SingleSelectField { id } } }
+  }
+}
+"""
+
+_SET_FIELD_OPTIONS_MUTATION = """
+mutation($field:ID!, $options:[ProjectV2SingleSelectFieldOptionInput!]!) {
+  updateProjectV2Field(input:{ fieldId:$field, singleSelectOptions:$options }) {
+    projectV2Field { ... on ProjectV2SingleSelectField { id } }
+  }
+}
+"""
+
 
 def _to_issue(gh_issue) -> Issue:
     return Issue(
@@ -266,6 +295,48 @@ class SdkGitHubClient(GitHubClient):
             _ADD_ITEM_MUTATION, {"project": project_id, "content": issue["id"]}
         )
         return added["addProjectV2ItemById"]["item"]["id"]
+
+    def create_board(self, columns: list[str]) -> None:
+        """Install-time board creation (S18): create a Projects v2 project on
+        the repo owner (or adopt the configured one) and set its single-select
+        status field to exactly `columns`. New Projects v2 projects ship with
+        a default "Status" field, so the option set is *updated*, never a
+        second field created. Same caveat as the rest of the GraphQL path:
+        no automated coverage until the S19 integration harness."""
+        owner = (self._project or {}).get("owner") or self._repo_name.split("/", 1)[0]
+        field_name = (self._project or {}).get("status_field", "Status")
+        if self._project is None:
+            owner_id = self._graphql(_OWNER_ID_QUERY, {"owner": owner})[
+                "repositoryOwner"
+            ]["id"]
+            created = self._graphql(
+                _CREATE_PROJECT_MUTATION, {"owner": owner_id, "title": "AORC"}
+            )["createProjectV2"]["projectV2"]
+            project_id = created["id"]
+            # Adopt the new project: board ops on this client are live now.
+            self._project = {
+                "owner": owner,
+                "number": created["number"],
+                "status_field": field_name,
+            }
+        else:
+            owner_login, number, field_name = self._project_owner_number_field()
+            project_id = self._graphql(
+                _PROJECT_ID_QUERY, {"owner": owner_login, "number": number}
+            )["repositoryOwner"]["projectV2"]["id"]
+        field_id = self._graphql(
+            _PROJECT_STATUS_FIELD_QUERY, {"project": project_id, "field": field_name}
+        )["node"]["field"]["id"]
+        self._graphql(
+            _SET_FIELD_OPTIONS_MUTATION,
+            {
+                "field": field_id,
+                "options": [
+                    {"name": column, "color": "GRAY", "description": ""}
+                    for column in columns
+                ],
+            },
+        )
 
     def set_board_column(self, issue_number: int, column: str) -> None:
         if self._project is None:

@@ -204,6 +204,11 @@ class GitHubClient(ABC):
     # The column is *derived* from the label by the state machine (S2); the
     # client only exposes the raw set/get so agents never compute it inline.
     @abstractmethod
+    def create_board(self, columns: list[str]) -> None:
+        """Create (or configure) the Projects board with the given column
+        set. Called exactly once, at App install time (S18)."""
+
+    @abstractmethod
     def set_board_column(self, issue_number: int, column: str) -> None: ...
 
     @abstractmethod

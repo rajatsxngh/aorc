@@ -288,6 +288,9 @@ class ScrubbingGitHubClient(GitHubClient):
         return self._inner.commit_file(scrub(branch), path, scrub(content), scrub(message))
 
     # ---- projects board -------------------------------------------------- #
+    def create_board(self, columns: list[str]) -> None:
+        return self._inner.create_board([scrub(c) for c in columns])
+
     def set_board_column(self, issue_number: int, column: str) -> None:
         return self._inner.set_board_column(issue_number, column)
 

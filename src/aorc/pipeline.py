@@ -17,6 +17,12 @@ from .interfaces import GitHubClient, Issue
 # webhook and cron tick; nothing sweeps agent-blocked.
 HELD_LABEL = "aorc-held"
 
+# `awaiting-config` (S18) parks dispatch-ready issues until the install-time
+# `.aorc.yml` PR merges -- the pipeline never builds against baked-in defaults
+# (PRD B23). Auto-releasable like `aorc-held`, but by the config gate opening
+# rather than a blocker clearing.
+AWAITING_CONFIG_LABEL = "awaiting-config"
+
 LABEL_COLUMN: dict[str, str] = {
     "needs-clarification": "Needs Clarification",
     "in-design": "In Progress",
@@ -25,6 +31,7 @@ LABEL_COLUMN: dict[str, str] = {
     "in-review": "In Review",
     "agent-blocked": "Blocked",
     HELD_LABEL: "Blocked",
+    AWAITING_CONFIG_LABEL: "Blocked",
 }
 BACKLOG_COLUMN = "Backlog"
 DONE_COLUMN = "Done"

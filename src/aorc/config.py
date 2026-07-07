@@ -62,6 +62,32 @@ class AorcConfig:
     raw: dict = field(default_factory=dict)
 
 
+# The fields without which the build pipeline cannot run: a missing one
+# blocks the repo's build pipeline (S18 install-time behavior) -- guessing
+# `pip install`/`pytest` is the toolchain-hallucination the file prevents.
+REQUIRED_BUILD_FIELDS = ("setup", "test")
+
+
+def build_blockers(config: AorcConfig) -> list[str]:
+    """Why the build pipeline may not run for this repo, empty if it may.
+    Fail-closed companion to `parse_config`: parsing can succeed while the
+    build is still blocked on required fields."""
+    return [
+        f"missing required field: {name}"
+        for name in REQUIRED_BUILD_FIELDS
+        if not getattr(config, name)
+    ]
+
+
+def auto_merge_allowed(config: AorcConfig) -> bool:
+    """Whether this repo may ever unattended-merge (PRD B27): requires the
+    explicit `merge.auto` opt-in *and* a `smoke:` block -- a repo the system
+    cannot whole-app-verify is permanently disqualified regardless of the
+    opt-in. Any future auto-merge path must consult this, never `merge_auto`
+    directly."""
+    return bool(config.merge_auto and config.smoke)
+
+
 def _expand(value: Any) -> Any:
     """Expand ``$VAR`` / ``${VAR}`` references from the environment."""
     if not isinstance(value, str):

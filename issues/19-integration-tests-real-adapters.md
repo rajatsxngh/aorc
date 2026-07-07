@@ -16,8 +16,9 @@ present), that exercise each adapter's real calls at least once:
 
 - `SdkGitHubClient` (PyGithub): read an issue, add/remove a label, open a PR,
   `get_file` (present + 404→None), `delete_branch`, and the Projects v2 board
-  path (`set_board_column` / `get_board_column`) against a real configured
-  project.
+  path (`set_board_column` / `get_board_column`, plus S18's `create_board` —
+  project creation + status-option update, GraphQL never exercised) against a
+  real configured project.
 - `DockerContainerRuntime`: `start` a container from a base image + `teardown`,
   against a real Docker daemon.
 - `ClaudeLLMClient` and `OpenAICompatibleLLMClient`: one real `complete()` call
@@ -35,6 +36,27 @@ job where those are provisioned.
 - [ ] `SdkGitHubClient` Projects v2 board read/write covered against a real project
 - [ ] Tests skip (not error) when the SDK extra / credentials / daemon are missing
 - [ ] CI job provisions the extras + secrets and runs the integration suite
+
+## Known limitation inherited from S15/S16 (S18 did not address it)
+
+A container holding `GITHUB_TOKEN` can push or hit the API **directly**,
+bypassing the orchestrator-side `ScrubbingGitHubClient` entirely — layer-2
+scrubbing only covers orchestrator-mediated writes. S18 landed no real
+container plumbing, so this lands here with the real-adapter work: route agent
+pushes through an orchestrator-mediated path or a scrubbing egress proxy, and
+stop passing secrets as `docker run -e KEY=value` (visible in host `ps`;
+`DockerContainerRuntime.start` does this today).
+
+## Notes from S18
+
+- `LocalGitOps` (`gitops.py`) is a real adapter but is already exercised
+  against real throwaway git repos by `tests/test_gitops.py` in the unit
+  suite (subprocess `git`, no SDK/daemon needed) — it does **not** need a
+  separate integration test here.
+- The generated `aorc-rollback.yml` workflow and the App-manifest registration
+  are declared-but-unexecuted surfaces; if CI provisioning allows, a smoke
+  check that the workflow YAML is accepted by `actionlint`/GitHub would fit
+  this slice.
 
 ## Blocked by
 
