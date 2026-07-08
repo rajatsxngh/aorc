@@ -217,6 +217,78 @@ def test_compose_attaches_a_pipeline_driver_when_setup_and_test_are_configured()
     assert collaborators.loop.driver is collaborators.driver
 
 
+def test_compose_materializes_the_target_clone_for_real_worktrees(monkeypatch):
+    """S35: when compose() must build a real WorktreeManager, repo_dir is
+    first resolved to a checkout of the TARGET repo (the live bug: '.' was
+    the orchestrator's own repo, so containers ran AORC's own test suite).
+    LocalGitOps must operate off the same resolved clone."""
+    monkeypatch.setenv(GITHUB_TOKEN_ENV, "ghp_" + "t" * 36)
+    calls = []
+
+    def fake_ensure(repo_dir, repo, token=None, **kwargs):
+        calls.append((repo_dir, repo, token))
+        return "/resolved/clone"
+
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+        ensure_clone=fake_ensure,
+    )
+
+    assert calls == [(".", "acme/widget", "ghp_" + "t" * 36)]
+    assert collaborators.loop.harness._worktrees._repo_dir == "/resolved/clone"
+    assert collaborators.merge_handler._gitops._repo == "/resolved/clone"
+
+
+def test_compose_skips_clone_resolution_when_worktrees_are_overridden():
+    calls = []
+
+    def fake_ensure(repo_dir, repo, token=None, **kwargs):
+        calls.append(repo_dir)
+        return "/never"
+
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+        ensure_clone=fake_ensure,
+    )
+
+    assert calls == []
+
+
+def test_run_fails_closed_on_a_target_repo_error(tmp_path, monkeypatch, capsys):
+    from aorc.harness import TargetRepoError
+
+    cfg_path = tmp_path / ".aorc.yml"
+    cfg_path.write_text(VALID_CONFIG)
+    monkeypatch.setenv(REPO_ENV, "acme/widget")
+
+    def raising_compose(*args, **kwargs):
+        raise TargetRepoError("repo_dir '.' is a checkout of 'rajat/aorc', expected 'acme/widget'")
+
+    monkeypatch.setattr("aorc.__main__.compose", raising_compose)
+
+    code = run(["--config", str(cfg_path), "wake"])
+
+    assert code == 1
+    assert "expected 'acme/widget'" in capsys.readouterr().err
+
+
 def test_compose_wires_a_container_test_runner_by_default():
     """S27: the live composition path (docker, the config default) must not
     use `SubprocessTestRunner` for the build pipeline -- toolchain commands

@@ -33,10 +33,12 @@ stage they're running.
 
 from __future__ import annotations
 
+import base64
 import os
 import posixpath
 import re
 import subprocess
+import sys
 import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -212,6 +214,123 @@ class DockerContainerRuntime(ContainerRuntime):
         handle.status = "stopped"
 
 
+# --------------------------------------------------------------------------- #
+# S35: the target-repo clone every real worktree hangs off
+# --------------------------------------------------------------------------- #
+# Live bug: the composition root defaulted repo_dir="." (the orchestrator's
+# own cwd), so per-issue worktrees were checkouts of AORC itself and the
+# container ran pytest against AORC's own test suite. Worktrees must only
+# ever be built from a checkout of the TARGET repo (`AORC_REPO`); when
+# repo_dir isn't one, AORC materializes its own clone.
+
+
+class TargetRepoError(Exception):
+    """The local checkout AORC would build worktrees from is not -- and could
+    not be made into -- a clone of the target repo. Fail closed: dispatching
+    from the wrong tree runs the wrong project's toolchain."""
+
+
+DEFAULT_CLONE_DIR = os.path.join(".aorc", "clone")
+
+_REMOTE_SLUG_RE = re.compile(r"[:/]([^/:]+/[^/:]+?)(?:\.git)?/?$")
+
+
+def origin_repo_slug(repo_dir: str) -> str | None:
+    """The `owner/repo` slug of `repo_dir`'s `origin` remote, or None when
+    the directory isn't a git repo / has no origin. Handles the common URL
+    forms (https, ssh, with/without `.git`)."""
+    proc = subprocess.run(
+        ["git", "-C", repo_dir, "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    match = _REMOTE_SLUG_RE.search(proc.stdout.strip())
+    return match.group(1) if match else None
+
+
+def _git_auth_env(token: str | None) -> dict[str, str] | None:
+    """Deliver the token through git's env-config channel: never in argv
+    (`ps`-visible, S19 discipline) and never persisted into the clone's
+    `.git/config` -- the remote URL stays credential-free."""
+    if not token:
+        return None
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    env = dict(os.environ)
+    env.update(
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+        }
+    )
+    return env
+
+
+def ensure_target_clone(
+    repo_dir: str,
+    repo: str,
+    token: str | None = None,
+    clone_dir: str = DEFAULT_CLONE_DIR,
+    clone_url: str | None = None,
+) -> str:
+    """Resolve the directory worktrees are built from to a checkout of
+    `repo` (the `owner/repo` target):
+
+    - `repo_dir` already a checkout of `repo` -> used as-is.
+    - otherwise -> the mismatch is surfaced on stderr and AORC's own clone
+      at `clone_dir` is used: reused (with a fetch) when it matches,
+      created fresh when absent. A `clone_dir` occupied by anything else,
+      or a failed clone, raises `TargetRepoError` -- fail closed, never
+      dispatch from the wrong tree.
+
+    `clone_url` overrides the default `https://github.com/{repo}.git`
+    (test seam: a local bare repo)."""
+    found = origin_repo_slug(repo_dir)
+    if found == repo:
+        return repo_dir
+    print(
+        f"aorc: repo_dir {repo_dir!r} is a checkout of {found or '(no git repo)'!r}, "
+        f"expected {repo!r} -- using target clone at {clone_dir!r}",
+        file=sys.stderr,
+    )
+    existing = origin_repo_slug(clone_dir)
+    if existing == repo:
+        # Freshen on reuse (S26 spirit); a failed fetch (offline, expired
+        # token) leaves a stale-but-correct clone, not a dead run.
+        subprocess.run(
+            ["git", "-C", clone_dir, "fetch", "origin"],
+            capture_output=True,
+            text=True,
+            env=_git_auth_env(token),
+        )
+        return clone_dir
+    if os.path.isdir(clone_dir):
+        raise TargetRepoError(
+            f"clone dir {clone_dir!r} exists but is a checkout of "
+            f"{existing or '(no git repo)'!r}, expected {repo!r} -- remove it "
+            "or point AORC at a checkout of the target repo"
+        )
+    url = clone_url or f"https://github.com/{repo}.git"
+    parent = os.path.dirname(clone_dir)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    proc = subprocess.run(
+        ["git", "clone", url, clone_dir],
+        capture_output=True,
+        text=True,
+        env=_git_auth_env(token),
+    )
+    if proc.returncode != 0:
+        raise TargetRepoError(
+            f"repo_dir {repo_dir!r} is a checkout of {found or '(no git repo)'!r}, "
+            f"expected {repo!r}, and cloning {url!r} into {clone_dir!r} failed: "
+            f"{proc.stderr.strip()}"
+        )
+    return clone_dir
+
+
 class WorktreeManager:
     """One git worktree per issue, on branch `aorc/issue-<n>`, created once
     and reused across re-dispatches.
@@ -228,7 +347,12 @@ class WorktreeManager:
 
     def __init__(self, repo_dir: str, worktrees_dir: str) -> None:
         self._repo_dir = repo_dir
-        self._worktrees_dir = worktrees_dir
+        # S35: anchor to the orchestrator's cwd at construction. `_git` runs
+        # with cwd=repo_dir (now possibly the .aorc/clone checkout), so a
+        # relative worktrees_dir would resolve against the clone in git's
+        # eyes while `path_for`/`os.path.isdir` resolve against the cwd --
+        # a split-brain that was masked when repo_dir was always ".".
+        self._worktrees_dir = os.path.abspath(worktrees_dir)
 
     def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         return subprocess.run(

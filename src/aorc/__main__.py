@@ -37,7 +37,7 @@ from .design import DesignStage
 from .driver import PipelineDriver
 from .escalation import BackoffLLMClient
 from .gitops import LocalGitOps
-from .harness import ContainerRuntime, WorktreeManager
+from .harness import ContainerRuntime, TargetRepoError, WorktreeManager, ensure_target_clone
 from .install import ConfigGatedWakeLoop, InstallHandler, route_webhook
 from .interfaces import GitHubClient, LLMClient
 from .llm import build_llm_client
@@ -128,6 +128,7 @@ def compose(
     base_image: str | None = None,
     dev_pat_minter: bool = False,
     no_container: bool = False,
+    ensure_clone=None,
 ) -> Collaborators:
     """Build the real collaborators and hand back the composed
     `ConfigGatedWakeLoop` + `InstallHandler`. Every parameter is overridable
@@ -175,6 +176,15 @@ def compose(
             image = base_image or _require_env(BASE_IMAGE_ENV)
             runtime = DockerContainerRuntime(image)
     if worktrees is None:
+        # S35: never build real worktrees off an arbitrary cwd. repo_dir is
+        # resolved to a checkout of the TARGET repo first -- used as-is when
+        # its origin already matches, otherwise AORC materializes its own
+        # clone (.aorc/clone) -- and LocalGitOps below operates off the same
+        # resolved checkout. Before this, repo_dir="." made every worktree a
+        # checkout of whatever repo the orchestrator happened to run from
+        # (live: AORC itself, so containers ran AORC's own test suite).
+        materialize = ensure_clone if ensure_clone is not None else ensure_target_clone
+        repo_dir = materialize(repo_dir, repo, token=os.environ.get(GITHUB_TOKEN_ENV))
         worktrees = WorktreeManager(repo_dir, worktrees_dir)
     if broker is None:
         if dev_pat_minter:
@@ -366,7 +376,7 @@ def run(argv: list[str] | None = None, *, collaborators: Collaborators | None = 
             collaborators = compose(
                 config, repo, dev_pat_minter=args.dev_pat_minter, no_container=args.no_container
             )
-        except (ConfigError, StartupError) as exc:
+        except (ConfigError, StartupError, TargetRepoError) as exc:
             print(f"aorc: {exc}", file=sys.stderr)
             return 1
 

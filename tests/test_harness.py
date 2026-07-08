@@ -536,6 +536,180 @@ def test_docker_start_mounts_worktree_at_absolute_path(monkeypatch):
     assert source == os.path.abspath(".aorc-worktrees/issue-7")
 
 
+# --- S35: worktrees must come from a clone of the TARGET repo --------------- #
+# Live bug: compose() defaulted repo_dir="." (the orchestrator's own cwd), so
+# per-issue worktrees were checkouts of AORC itself and the container ran
+# pytest against AORC's own test suite instead of the sandbox project's.
+
+
+def _git_out(args, cwd):
+    import subprocess as sp
+
+    return sp.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+
+
+def _repo_with_origin(path, url):
+    path.mkdir(parents=True, exist_ok=True)
+    _git_out(["init", "-q"], cwd=path)
+    _git_out(["remote", "add", "origin", url], cwd=path)
+    return path
+
+
+def test_origin_repo_slug_parses_common_remote_url_forms(tmp_path):
+    from aorc.harness import origin_repo_slug
+
+    https = _repo_with_origin(tmp_path / "a", "https://github.com/acme/widget.git")
+    ssh = _repo_with_origin(tmp_path / "b", "git@github.com:acme/widget.git")
+    bare_https = _repo_with_origin(tmp_path / "c", "https://github.com/acme/widget")
+
+    assert origin_repo_slug(str(https)) == "acme/widget"
+    assert origin_repo_slug(str(ssh)) == "acme/widget"
+    assert origin_repo_slug(str(bare_https)) == "acme/widget"
+
+
+def test_origin_repo_slug_is_none_for_a_non_repo_dir(tmp_path):
+    from aorc.harness import origin_repo_slug
+
+    assert origin_repo_slug(str(tmp_path)) is None
+
+
+def test_ensure_target_clone_uses_repo_dir_when_origin_matches(tmp_path):
+    from aorc.harness import ensure_target_clone
+
+    repo_dir = _repo_with_origin(tmp_path / "checkout", "https://github.com/acme/widget.git")
+
+    resolved = ensure_target_clone(
+        str(repo_dir), "acme/widget", clone_dir=str(tmp_path / "clone")
+    )
+
+    assert resolved == str(repo_dir)
+    assert not (tmp_path / "clone").exists()
+
+
+def test_ensure_target_clone_clones_the_target_on_mismatch(tmp_path, capsys):
+    """repo_dir is a checkout of some OTHER repo (the live bug: AORC itself)
+    -- the clone must be materialized and the mismatch surfaced."""
+    import subprocess as sp
+
+    from aorc.harness import ensure_target_clone
+
+    # A local bare repo stands in for github.com/acme/widget (clone_url seam).
+    upstream = tmp_path / "upstream.git"
+    seed = _repo_with_origin(tmp_path / "seed", "https://github.com/acme/widget.git")
+    (seed / "README.md").write_text("sandbox\n")
+    _git_out(["add", "."], cwd=seed)
+    _git_out(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "seed"], cwd=seed)
+    sp.run(["git", "clone", "-q", "--bare", str(seed), str(upstream)], check=True, capture_output=True)
+
+    repo_dir = _repo_with_origin(tmp_path / "aorc-itself", "https://github.com/rajat/aorc.git")
+    clone_dir = tmp_path / "clone"
+
+    resolved = ensure_target_clone(
+        str(repo_dir), "acme/widget", clone_dir=str(clone_dir), clone_url=str(upstream)
+    )
+
+    assert resolved == str(clone_dir)
+    assert (clone_dir / "README.md").exists()
+    err = capsys.readouterr().err
+    assert "rajat/aorc" in err and "acme/widget" in err  # the Fix-1 mismatch notice
+
+
+def test_ensure_target_clone_refuses_a_clone_dir_owned_by_another_repo(tmp_path):
+    import pytest
+
+    from aorc.harness import TargetRepoError, ensure_target_clone
+
+    _repo_with_origin(tmp_path / "clone", "https://github.com/some/other.git")
+
+    with pytest.raises(TargetRepoError, match="acme/widget"):
+        ensure_target_clone(
+            str(tmp_path / "not-a-repo"), "acme/widget", clone_dir=str(tmp_path / "clone")
+        )
+
+
+def test_ensure_target_clone_fails_closed_when_the_clone_fails(tmp_path):
+    import pytest
+
+    from aorc.harness import TargetRepoError, ensure_target_clone
+
+    with pytest.raises(TargetRepoError, match="acme/widget"):
+        ensure_target_clone(
+            str(tmp_path / "not-a-repo"),
+            "acme/widget",
+            clone_dir=str(tmp_path / "clone"),
+            clone_url=str(tmp_path / "no-such-upstream"),
+        )
+
+
+class _RecordingGit:
+    """Routes fake results for the git invocations ensure_target_clone makes;
+    records (argv, env) so token-hygiene can be asserted."""
+
+    def __init__(self, geturl: dict[str, str] | None = None) -> None:
+        self.geturl = geturl or {}
+        self.calls: list[tuple[list, dict | None]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((list(argv), kwargs.get("env")))
+        if "get-url" in argv:
+            repo_dir = argv[argv.index("-C") + 1]
+            url = self.geturl.get(repo_dir)
+            rc = 0 if url else 128
+            return subprocess.CompletedProcess(argv, rc, url or "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def test_ensure_target_clone_keeps_the_token_out_of_argv(tmp_path, monkeypatch):
+    from aorc.harness import ensure_target_clone
+
+    fake = _RecordingGit()
+    monkeypatch.setattr("aorc.harness.subprocess.run", fake)
+
+    ensure_target_clone(
+        str(tmp_path / "not-a-repo"),
+        "acme/widget",
+        token="ghs_supersecret",
+        clone_dir=str(tmp_path / "clone"),
+    )
+
+    clone_calls = [(argv, env) for argv, env in fake.calls if "clone" in argv]
+    assert clone_calls, "expected a git clone invocation"
+    argv, env = clone_calls[0]
+    assert "ghs_supersecret" not in " ".join(argv)
+    assert env is not None and env.get("GIT_CONFIG_COUNT") == "1"
+    assert "ghs_supersecret" not in env["GIT_CONFIG_VALUE_0"]  # basic-auth encoded, not raw
+
+
+def test_ensure_target_clone_fetches_an_existing_matching_clone(tmp_path, monkeypatch):
+    from aorc.harness import ensure_target_clone
+
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    fake = _RecordingGit(geturl={str(clone_dir): "https://github.com/acme/widget.git\n"})
+    monkeypatch.setattr("aorc.harness.subprocess.run", fake)
+
+    resolved = ensure_target_clone(
+        str(tmp_path / "not-a-repo"), "acme/widget", clone_dir=str(clone_dir)
+    )
+
+    assert resolved == str(clone_dir)
+    assert any("fetch" in argv for argv, _ in fake.calls)
+    assert not any("clone" in argv for argv, _ in fake.calls)
+
+
+def test_worktree_manager_anchors_worktrees_dir_at_construction(tmp_path):
+    """S35: with repo_dir now a clone elsewhere, a relative worktrees_dir
+    must not silently resolve against the clone (git runs cwd=repo_dir) --
+    it is anchored absolute at construction time."""
+    import os
+
+    from aorc.harness import WorktreeManager
+
+    manager = WorktreeManager(str(tmp_path), ".aorc-worktrees")
+
+    assert os.path.isabs(manager.path_for(3))
+
+
 def test_docker_start_runs_a_long_lived_command(monkeypatch):
     """S33: `docker run -d <image>` with no command leaves the container's
     lifetime to the image's default CMD -- a stock image exits instantly,
