@@ -52,11 +52,12 @@ from .design import (
     DesignStage,
     checkpoint_report,
     design_doc_path,
+    mentioned_files,
     parse_design_response,
     resolve_design_files,
 )
 from .guards import BLOCKED_LABEL
-from .harness import CheckpointReport, WorktreeManager
+from .harness import CheckpointReport, WorktreeManager, read_worktree_file
 from .interfaces import GitHubClient, PullRequest
 from .pipeline import (
     HELD_LABEL,
@@ -145,7 +146,15 @@ class PipelineDriver:
             if self._artifacts.design_doc_exists(issue_number):
                 label = self._state_machine.advance(issue_number)  # -> "in-test"
             else:
-                result = self._design.run(issue_number, issue.body, qa=qa)
+                # S44, design half: put the current contents of every
+                # existing file the issue text names in front of the design
+                # agent, so the design accounts for interfaces already there.
+                context_files = self._worktree_contents(
+                    mentioned_files(issue.body or "", cwd), cwd
+                )
+                result = self._design.run(
+                    issue_number, issue.body, qa=qa, repo_files=context_files
+                )
                 if result.status == "needs-clarification":
                     self._github.add_label(issue_number, CLARIFICATION_LABEL)
                     self._github.set_board_column(issue_number, LABEL_COLUMN[CLARIFICATION_LABEL])
@@ -197,7 +206,14 @@ class PipelineDriver:
         if label == "in-code":
             # No static artifact for this stage (see module docstring) --
             # always run it rather than trust a bygone-presence check.
-            result = self._coder.run(issue_number, design_doc, cwd=cwd)
+            # S44 (live issue 29): the coder writes FULL file contents, so it
+            # must see each design file's CURRENT contents -- the worktree is
+            # the synced source of truth (S22) and by now holds pre-existing
+            # code plus the tester's seeded stubs. Fed nothing, the coder
+            # rewrites shared files from a blank slate and deletes every
+            # function the design doc didn't mention.
+            repo_files = self._worktree_contents(design_doc.files, cwd)
+            result = self._coder.run(issue_number, design_doc, repo_files=repo_files, cwd=cwd)
             if result.status != "proceed":
                 self._block(issue_number, "in-code", result.reason)
                 return DriverResult(status="agent-blocked", stage="in-code", reason=result.reason)
@@ -211,6 +227,16 @@ class PipelineDriver:
             return DriverResult(status="proceed", stage="in-review", pr=result.pr)
 
         return DriverResult(status=label or "unknown", stage=label)
+
+    @staticmethod
+    def _worktree_contents(paths: list, cwd: str) -> dict[str, str]:
+        contents = {}
+        for path in paths:
+            if isinstance(path, str):
+                content = read_worktree_file(cwd, path)
+                if content is not None:
+                    contents[path] = content
+        return contents
 
     def _load_design_doc(self, issue_number: int) -> DesignDoc | None:
         raw = self._github.get_file(design_doc_path(issue_number), branch_name(issue_number))

@@ -428,6 +428,20 @@ def write_worktree_file(cwd: str, path: str, content: str) -> None:
         fh.write(content)
 
 
+def read_worktree_file(cwd: str, path: str) -> str | None:
+    """The read half of the S22 mirror: what the worktree currently holds at
+    `path`, or `None` if nothing does. `cwd == "."` means no real worktree
+    was ever supplied (the unit-suite default) -- reading the process's own
+    directory would be a lie, so mirror `write_worktree_file`'s skip."""
+    if cwd == ".":
+        return None
+    full_path = os.path.join(cwd, path)
+    if not os.path.isfile(full_path):
+        return None
+    with open(full_path, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
 class InFlightRegistry:
     """Tracks each dispatched issue's claimed file list as reported at its
     checkpoint, so collision logic can ask "what files are claimed by

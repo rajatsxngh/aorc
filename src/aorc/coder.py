@@ -25,6 +25,7 @@ or the tester's test internals.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from .design import DesignDoc
@@ -51,8 +52,11 @@ _CODER_SYSTEM_PROMPT = (
     '{"tasks": [{"task": "<task from task_list>", "path": "<exact path from '
     'the allowed files>", "code": "<full new file content>"}, ...]}. Write '
     "exactly one entry per task, in task_list order, touching only paths "
-    "from the design's `files` list. Reply with the JSON object only, no "
-    "surrounding prose."
+    "from the design's `files` list. Each `Repo file` section shows that "
+    "file's current contents: your `code` for a file must preserve all of "
+    "its existing code -- every top-level function, class, and assignment -- "
+    "adding or modifying only what the task requires. Reply with the JSON "
+    "object only, no surrounding prose."
 )
 
 
@@ -106,6 +110,32 @@ def parse_coder_response(text: str, task_list: list, allowed_files: list) -> Cod
         if not isinstance(code, str) or not code.strip():
             return None
     return CoderDoc(tasks=tasks, raw=data)
+
+
+# Column-0 definitions only: methods and nested defs are their container's
+# business, not the file's top-level surface.
+_TOP_LEVEL_NAME_RE = re.compile(
+    r"^(?:(?:async\s+)?def\s+(\w+)|class\s+(\w+)|(\w+)\s*=[^=])", re.MULTILINE
+)
+
+
+def top_level_names(source: str) -> set[str]:
+    """Top-level `def`/`async def`/`class`/assignment names in `source`."""
+    return {
+        group
+        for match in _TOP_LEVEL_NAME_RE.finditer(source or "")
+        for group in match.groups()
+        if group
+    }
+
+
+def missing_preserved_names(existing: str, new: str) -> list[str]:
+    """S44 mechanical guard (live issue 29): the coder writes full file
+    contents, so every top-level name the file currently defines must still
+    be defined afterwards. The prompt asks for preservation; this enforces
+    it -- same philosophy as `parse_coder_response`'s locked-tests check, a
+    schema constraint rather than a runtime convention."""
+    return sorted(top_level_names(existing) - top_level_names(new))
 
 
 def failing_test_summary(result: TestRunResult) -> str:
@@ -209,6 +239,23 @@ class CoderStage:
                     '(expected JSON {"tasks": [{"task", "path", "code"}]}); '
                     f"finish_reason={completion.finish_reason}; "
                     f"response head: {_head(completion.text)}"
+                )
+                continue
+
+            # S44 preservation guard: validate the whole batch BEFORE any
+            # write -- a response that deletes an existing top-level name is
+            # a failed attempt, never a commit.
+            violations = [
+                f"{entry['path']} no longer defines: {', '.join(missing)}"
+                for entry in doc.tasks
+                if (missing := missing_preserved_names(repo_files.get(entry["path"], ""), entry["code"]))
+            ]
+            if violations:
+                failure = (
+                    "preservation miss: your full-file content deleted existing "
+                    "top-level code -- " + "; ".join(violations) + ". Rewrite each "
+                    "file's complete contents keeping all existing functions, "
+                    "classes, and assignments alongside your changes."
                 )
                 continue
 

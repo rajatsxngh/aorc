@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 
 from .graphify import GraphifyClient
@@ -122,6 +123,26 @@ def resolve_design_files(files: list, cwd: str) -> list:
                 )
         resolved.append(matches[0] if len(matches) == 1 else entry)
     return resolved
+
+
+# Path-shaped tokens in prose: something with a dot-extension, optionally
+# directory-qualified ("math_utils.py", "src/pkg/mod.py").
+_FILE_TOKEN_RE = re.compile(r"[\w./-]*\w\.\w+")
+
+
+def mentioned_files(issue_body: str, cwd: str) -> list[str]:
+    """S44: the existing files an issue's text names, snapped to real
+    worktree paths with the same basename-matching rule as
+    `resolve_design_files`. These are the files whose CURRENT contents the
+    design agent must see, so its design accounts for the interfaces already
+    there instead of treating the file as new. Tokens that resolve to
+    nothing on disk (version numbers, files that don't exist yet) simply
+    drop out."""
+    tokens = list(dict.fromkeys(_FILE_TOKEN_RE.findall(issue_body or "")))
+    resolved = resolve_design_files(tokens, cwd)
+    return list(
+        dict.fromkeys(p for p in resolved if os.path.isfile(os.path.join(cwd, p)))
+    )
 
 
 def checkpoint_report(issue_number: int, doc: DesignDoc) -> CheckpointReport:

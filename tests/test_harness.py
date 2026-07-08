@@ -20,6 +20,8 @@ from aorc.harness import (
     cleanup_branch,
     container_name_for,
     issue_number_from_worktree_path,
+    read_worktree_file,
+    write_worktree_file,
 )
 from aorc.interfaces import Issue, PullRequest
 from aorc.pipeline import branch_name
@@ -864,3 +866,22 @@ def test_issue_number_from_worktree_path_strips_trailing_slash():
 def test_issue_number_from_worktree_path_none_for_unrelated_path():
     assert issue_number_from_worktree_path(".") is None
     assert issue_number_from_worktree_path("/tmp/not-a-worktree") is None
+
+
+# ---- S44: read_worktree_file -- the read half of the S22 mirror ------------ #
+
+
+def test_read_worktree_file_round_trips_what_write_wrote(tmp_path):
+    write_worktree_file(str(tmp_path), "pkg/mod.py", "x = 1\n")
+
+    assert read_worktree_file(str(tmp_path), "pkg/mod.py") == "x = 1\n"
+
+
+def test_read_worktree_file_none_for_missing_file(tmp_path):
+    assert read_worktree_file(str(tmp_path), "absent.py") is None
+
+
+def test_read_worktree_file_skips_dot_cwd_like_write_does():
+    # `cwd == "."` means "no real worktree was supplied" (unit-suite default);
+    # reading whatever the process cwd happens to hold would be a lie.
+    assert read_worktree_file(".", "README.md") is None

@@ -550,3 +550,107 @@ def test_blocked_coder_posts_stage_and_reason_comment(tmp_path):
     assert result.reason
     bodies = [c.body for c in gh.list_comments(1)]
     assert any("in-code" in b and BLOCKED_LABEL in b for b in bodies)
+
+
+# ---- S44: live issue-29 repro -- coder rewrites shared files from a blank --- #
+# ---- slate and deletes pre-existing code ------------------------------------ #
+
+
+class _PreservingCoderLLM:
+    """Stands in for a competent coder model: it can only preserve code it can
+    SEE. Shown math_utils.py's current contents it returns a full file keeping
+    every existing def; blind (the pre-S44 driver passed no repo_files), it
+    emits just its own function -- exactly what the live model did."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    @property
+    def model(self) -> str:
+        return "mock-model"
+
+    def complete(self, messages, *, max_tokens=1024, temperature=0.0):
+        from aorc.interfaces import Completion
+
+        self.calls.append((messages, {}))
+        sent = "\n".join(m.content for m in messages)
+        if "def multiply" in sent:
+            code = (
+                "def multiply(a, b):\n    return a * b\n\n\n"
+                "def power(a, b):\n    return a ** b\n"
+            )
+        else:
+            code = "def power(a, b):\n    return a ** b\n"
+        response = json.dumps(
+            {"tasks": [{"task": "implement power()", "path": "math_utils.py", "code": code}]}
+        )
+        return Completion(text=response, model="mock-model", finish_reason="stop")
+
+
+def test_coder_preserves_preexisting_functions_in_shared_file(tmp_path):
+    """Live issue-29 repro at the driver level: math_utils.py already defines
+    multiply (an earlier issue's merged work); this issue's design covers only
+    power. The coder writes FULL file contents, so unless the driver feeds it
+    the file's current contents, it rewrites the module from a blank slate and
+    multiply is deleted from both the worktree and the PR."""
+    existing = "def multiply(a, b):\n    return a * b\n"
+    (tmp_path / "math_utils.py").write_text(existing)
+
+    gh = MockGitHubClient(issues=[Issue(number=1, body="add power(a, b) to math_utils.py")])
+    # A real branch created off main carries the file; the mock's
+    # create_branch copies nothing, so seed the branch-side copy directly.
+    gh.add_file(branch_name(1), "math_utils.py", existing)
+
+    power_design = json.dumps(
+        {
+            "interface": [{"name": "power", "inputs": ["a", "b"], "outputs": "int"}],
+            "test_specs": ["power(2, 3) == 8"],
+            "task_list": ["implement power()"],
+            "files": ["math_utils.py"],
+            "confidence": 0.9,
+        }
+    )
+    power_test = json.dumps(
+        {"tests": [{"task": "implement power()", "code": "def test_power():\n    assert power(2, 3) == 8\n"}]}
+    )
+    coder_llm = _PreservingCoderLLM()
+    runner = MockTestRunner(results=list(_DEFAULT_TEST_RESULTS))
+    design = DesignStage(MockLLMClient(responses=[power_design]), gh)
+    tester = TestStage(
+        MockLLMClient(responses=[power_test]), MockLLMClient(responses=[_CRITIC_APPROVE]), gh, runner
+    )
+    coder = CoderStage(coder_llm, gh, runner)
+    reviewer = ReviewerStage(MockLLMClient(responses=[_REVIEW_APPROVE]), coder, gh, runner)
+    driver = PipelineDriver(gh, FakeWorktrees(str(tmp_path)), design, tester, coder, reviewer)
+
+    result = driver.run(1)
+
+    assert result.status == "proceed"
+    # The coder's prompt carried the file's current contents...
+    coder_prompt = "\n".join(m.content for m in coder_llm.calls[0][0])
+    assert "def multiply" in coder_prompt
+    assert "preserve" in coder_prompt.lower()
+    # ...and multiply survived in the worktree and the committed content.
+    worktree_now = (tmp_path / "math_utils.py").read_text()
+    assert "def multiply" in worktree_now and "def power" in worktree_now
+    committed = gh.get_file("math_utils.py", branch_name(1))
+    assert committed is not None
+    assert "def multiply" in committed and "def power" in committed
+
+
+def test_design_stage_sees_contents_of_files_the_issue_mentions(tmp_path):
+    """S44, design half: an issue that names an existing file ("add power to
+    math_utils.py") must put that file's current contents in front of the
+    design agent, so the design accounts for the interfaces already there
+    instead of describing the file as if it were new."""
+    (tmp_path / "math_utils.py").write_text("def multiply(a, b):\n    return a * b\n")
+    driver, gh, llms, runner = _build_driver(
+        tmp_path,
+        issues=[Issue(number=1, body="add power(a, b) to math_utils.py")],
+        design_responses=[_LOW_CONFIDENCE_DESIGN_JSON],  # stop after design
+    )
+
+    driver.run(1)
+
+    design_prompt = "\n".join(m.content for m in llms["design"].calls[0][0])
+    assert "def multiply" in design_prompt

@@ -8,6 +8,7 @@ from aorc.design import (
     DesignStage,
     checkpoint_report,
     design_doc_path,
+    mentioned_files,
     parse_design_response,
     rebuild_in_flight_registry,
 )
@@ -285,3 +286,21 @@ def test_resolve_design_files_ignores_vcs_and_cache_dirs(tmp_path):
     (tmp_path / "src" / "math_utils.py").write_text("")
 
     assert resolve_design_files(["math_utils.py"], str(tmp_path)) == ["src/math_utils.py"]
+
+
+# ---- S44: files the issue text mentions ------------------------------------ #
+
+
+def test_mentioned_files_resolves_paths_named_in_the_issue_body(tmp_path):
+    (tmp_path / "src" / "sandbox").mkdir(parents=True)
+    (tmp_path / "src" / "sandbox" / "math_utils.py").write_text(
+        "def multiply(a, b):\n    return a * b\n"
+    )
+
+    body = "add power(a, b) to math_utils.py -- target python 3.12"
+    assert mentioned_files(body, str(tmp_path)) == ["src/sandbox/math_utils.py"]
+
+
+def test_mentioned_files_empty_when_issue_names_nothing_real(tmp_path):
+    assert mentioned_files("make everything faster", str(tmp_path)) == []
+    assert mentioned_files("touch ghost_module.py please", str(tmp_path)) == []

@@ -9,6 +9,7 @@ from aorc.coder import (
     CoderStage as Stage,
     ProviderError,
     failing_test_summary,
+    missing_preserved_names,
     parse_coder_response,
 )
 from aorc.design import DesignDoc
@@ -377,3 +378,69 @@ def test_coder_hard_fails_immediately_on_infra_failure():
     assert len(llm.calls) == 1
     assert "is not running" in result.reason
     assert "infra" in result.reason
+
+
+# ---- S44: mechanical preservation guard ----------------------------------- #
+# The prompt asks the coder to preserve existing code; the guard enforces it.
+# A response whose full-file content drops a top-level name that the file's
+# current contents define is a failed attempt (fed back like a schema miss),
+# never a commit.
+
+_MATH_DESIGN = DesignDoc(
+    interface=[{"name": "power", "inputs": ["a", "b"], "outputs": "int"}],
+    test_specs=["power(2, 3) == 8"],
+    task_list=["implement power()"],
+    files=["math_utils.py"],
+    confidence=0.9,
+)
+_EXISTING_MATH = "def multiply(a, b):\n    return a * b\n"
+_DROPS_MULTIPLY = json.dumps(
+    {"tasks": [{"task": "implement power()", "path": "math_utils.py",
+                "code": "def power(a, b):\n    return a ** b\n"}]}
+)
+_KEEPS_MULTIPLY = json.dumps(
+    {"tasks": [{"task": "implement power()", "path": "math_utils.py",
+                "code": "def multiply(a, b):\n    return a * b\n\n\ndef power(a, b):\n    return a ** b\n"}]}
+)
+
+
+def test_missing_preserved_names_covers_def_class_assignment_and_async():
+    old = (
+        "X = 1\n\nclass Shape:\n    def draw(self):\n        pass\n\n"
+        "def area(s):\n    return 0\n\nasync def fetch():\n    pass\n"
+    )
+    new = "def area(s):\n    return 1\n"
+
+    assert missing_preserved_names(old, new) == ["Shape", "X", "fetch"]
+    assert missing_preserved_names(old, old) == []
+    # methods are not top-level: dropping draw() alone is not a violation
+    assert "draw" not in missing_preserved_names(old, new)
+
+
+def test_deleting_existing_top_level_name_fails_the_attempt_and_feeds_back():
+    stage, llm, gh, runner = _stage(
+        [_DROPS_MULTIPLY, _KEEPS_MULTIPLY], test_results=[RunResult(returncode=0)]
+    )
+
+    result = stage.run(1, _MATH_DESIGN, repo_files={"math_utils.py": _EXISTING_MATH})
+
+    assert result.status == "proceed"
+    assert result.attempts == 2
+    second_prompt = "\n".join(m.content for m in llm.calls[1][0])
+    assert "preservation miss" in second_prompt
+    assert "multiply" in second_prompt
+    committed = gh.get_file("math_utils.py", branch_name(1))
+    assert "def multiply" in committed and "def power" in committed
+    # the deleting attempt never reached the branch
+    assert len([c for c in gh.calls if c[0] == "commit_file"]) == 1
+
+
+def test_persistent_deletion_exhausts_to_agent_blocked_without_committing():
+    stage, llm, gh, runner = _stage([_DROPS_MULTIPLY] * 3, test_results=[])
+
+    result = stage.run(1, _MATH_DESIGN, repo_files={"math_utils.py": _EXISTING_MATH})
+
+    assert result.status == "agent-blocked"
+    assert "preservation miss" in result.reason
+    assert gh.get_file("math_utils.py", branch_name(1)) is None
+    assert len(runner.calls) == 0  # deleting code never reached the toolchain
