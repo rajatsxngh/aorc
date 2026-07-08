@@ -286,3 +286,77 @@ def test_real_worktree_and_subprocess_toolchain_see_coders_committed_code(tmp_pa
     assert result.status == "proceed"
     assert result.attempts == 1
     assert (Path(cwd) / "add.py").read_text() == "def add(a, b):\n    return a + b\n"
+
+
+# ---- S26 -- fetch remote branch on resume from a fresh worktree ------------ #
+
+
+def _real_git(args, cwd):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+
+
+def _init_bare_remote(tmp_path):
+    remote = tmp_path / "remote.git"
+    _real_git(["init", "--bare", "-b", "main", str(remote)], cwd=tmp_path)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _real_git(["init", "-b", "main"], cwd=seed)
+    _real_git(["config", "user.email", "a@a.com"], cwd=seed)
+    _real_git(["config", "user.name", "a"], cwd=seed)
+    (seed / "README.md").write_text("hi\n")
+    _real_git(["add", "."], cwd=seed)
+    _real_git(["commit", "-m", "init"], cwd=seed)
+    _real_git(["remote", "add", "origin", str(remote)], cwd=seed)
+    _real_git(["push", "origin", "main"], cwd=seed)
+    return remote
+
+
+def _real_clone(remote, dest):
+    _real_git(["clone", str(remote), str(dest)], cwd=dest.parent)
+    _real_git(["config", "user.email", "a@a.com"], cwd=dest)
+    _real_git(["config", "user.name", "a"], cwd=dest)
+    return dest
+
+
+def test_driver_resume_at_in_code_with_fresh_worktree_sees_earlier_committed_test(tmp_path):
+    """The literal S26 acceptance criterion: driver resumes at "in-code" --
+    `ArtifactChecker.tests_committed` reports True via `MockGitHubClient`'s
+    own in-memory marker (the API-side record of the earlier `TesterStage`
+    run) -- but the worktree for this issue has never been created on this
+    machine. Before the S26 fix, `WorktreeManager.ensure` would build a
+    worktree with no knowledge of the generated test file an earlier
+    attempt actually pushed to the real branch, so the coder's toolchain
+    would find no tests to run at all (and could go green vacuously)."""
+    remote = _init_bare_remote(tmp_path)
+    local_clone = _real_clone(remote, tmp_path / "local")
+
+    branch = branch_name(1)
+    machine_a = _real_clone(remote, tmp_path / "machine-a")
+    _real_git(["checkout", "-b", branch], cwd=machine_a)
+    test_dir = machine_a / "aorc" / "issue-1"
+    test_dir.mkdir(parents=True)
+    (test_dir / "test_generated.py").write_text("def test_from_earlier_attempt():\n    assert True\n")
+    _real_git(["add", "."], cwd=machine_a)
+    _real_git(["commit", "-m", "tests"], cwd=machine_a)
+    _real_git(["push", "origin", branch], cwd=machine_a)
+
+    gh = MockGitHubClient(issues=[Issue(number=1, body="add two numbers")])
+    gh.issues[1].labels.append("in-code")
+    gh.add_file(branch_name(1), design_doc_path(1), _DESIGN_JSON)
+    gh.add_file(branch_name(1), marker_path(1), "committed")
+
+    runner = SubprocessTestRunner()
+    coder = CoderStage(
+        MockLLMClient(responses=[_ONE_TASK]), gh, runner, test_command="pytest -q"
+    )
+    reviewer = ReviewerStage(MockLLMClient(responses=[_REVIEW_APPROVE]), coder, gh, runner)
+    design = DesignStage(MockLLMClient(responses=[]), gh)
+    tester = TestStage(MockLLMClient(responses=[]), MockLLMClient(responses=[]), gh, runner)
+    worktrees = WorktreeManager(str(local_clone), str(tmp_path / "worktrees"))
+    driver = PipelineDriver(gh, worktrees, design, tester, coder, reviewer)
+
+    result = driver.run(1)
+
+    assert result.status == "proceed"
+    cwd = worktrees.ensure(1)
+    assert (Path(cwd) / "aorc" / "issue-1" / "test_generated.py").exists()

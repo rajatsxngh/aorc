@@ -181,32 +181,66 @@ class DockerContainerRuntime(ContainerRuntime):
 
 class WorktreeManager:
     """One git worktree per issue, on branch `aorc/issue-<n>`, created once
-    and reused across re-dispatches."""
+    and reused across re-dispatches.
+
+    S26 -- fetch-on-resume: a missing/fresh worktree is rebuilt from the
+    fetched `origin` remote rather than the local clone's possibly-stale
+    branch state, so a cold start (fresh checkout, deleted worktree dir, or
+    an orchestrator restarted on a different machine) sees every commit
+    that reached the branch via the GitHub API since this clone last synced.
+    An already-present worktree is left untouched -- S22's mirror-on-commit
+    path keeps a hot worktree in sync without a remote round-trip, so
+    resuming into a worktree dir that already exists never needs a fetch.
+    """
 
     def __init__(self, repo_dir: str, worktrees_dir: str) -> None:
         self._repo_dir = repo_dir
         self._worktrees_dir = worktrees_dir
 
-    def _git(self, *args: str) -> subprocess.CompletedProcess:
+    def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["git", *args], cwd=self._repo_dir, capture_output=True, text=True, check=True
+            ["git", *args], cwd=self._repo_dir, capture_output=True, text=True, check=check
         )
 
     def path_for(self, issue_number: int) -> str:
         return os.path.join(self._worktrees_dir, f"issue-{issue_number}")
 
+    def _has_remote(self) -> bool:
+        return "origin" in self._git("remote", check=False).stdout.split()
+
+    def _ref_exists(self, ref: str) -> bool:
+        return self._git("rev-parse", "--verify", "--quiet", ref, check=False).returncode == 0
+
     def ensure(self, issue_number: int) -> str:
-        """Create the branch + worktree if this is the first dispatch;
-        reuse the existing worktree on any re-dispatch."""
+        """Create the branch + worktree if this is the first dispatch (or
+        the worktree dir was deleted/never made on this machine); reuse the
+        existing worktree dir as-is on any re-dispatch."""
         path = self.path_for(issue_number)
         if os.path.isdir(path):
             return path
+
         branch = branch_name(issue_number)
-        existing = self._git("branch", "--list", branch).stdout
-        if branch in existing:
+        has_remote = self._has_remote()
+        if has_remote:
+            self._git("fetch", "origin", check=False)
+
+        remote_ref = f"origin/{branch}"
+        if has_remote and self._ref_exists(remote_ref):
+            # Branch already has commits on the remote (e.g. the API-driven
+            # tester/coder writes from an earlier attempt) -- (re)point the
+            # local branch at the fetched tip rather than trusting whatever
+            # this clone last saw, then build the worktree from that.
+            self._git("branch", "-f", branch, remote_ref)
+            self._git("worktree", "add", path, branch)
+            return path
+
+        if self._ref_exists(branch):
             self._git("worktree", "add", path, branch)
         else:
-            self._git("worktree", "add", "-b", branch, path)
+            # Brand new branch: base it on the fetched remote default branch
+            # when one exists, not this clone's possibly-stale local HEAD.
+            base = "origin/main" if has_remote and self._ref_exists("origin/main") else "HEAD"
+            self._git("worktree", "add", "-b", branch, path, base)
         return path
 
 

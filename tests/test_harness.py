@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -522,3 +523,90 @@ def test_docker_start_without_env_passes_no_env_file(monkeypatch):
 
     assert "--env-file" not in fake.argv
     assert "-e" not in fake.argv
+
+
+# ---- S26 -- fetch remote branch on resume from a fresh worktree ----------- #
+
+
+def _git(args, cwd, check=True):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=check)
+
+
+def _init_bare_remote(tmp_path):
+    """A throwaway bare 'remote' repo, seeded with one commit on `main`,
+    reachable only by cloning -- stands in for the real GitHub remote the
+    orchestrator's own API commits ultimately land on."""
+    remote = tmp_path / "remote.git"
+    _git(["init", "--bare", "-b", "main", str(remote)], cwd=tmp_path)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git(["init", "-b", "main"], cwd=seed)
+    _git(["config", "user.email", "a@a.com"], cwd=seed)
+    _git(["config", "user.name", "a"], cwd=seed)
+    (seed / "README.md").write_text("hi\n")
+    _git(["add", "."], cwd=seed)
+    _git(["commit", "-m", "init"], cwd=seed)
+    _git(["remote", "add", "origin", str(remote)], cwd=seed)
+    _git(["push", "origin", "main"], cwd=seed)
+    return remote
+
+
+def _clone(remote, dest):
+    _git(["clone", str(remote), str(dest)], cwd=dest.parent)
+    _git(["config", "user.email", "a@a.com"], cwd=dest)
+    _git(["config", "user.name", "a"], cwd=dest)
+    return dest
+
+
+def test_ensure_fetches_a_branch_committed_only_on_the_remote(tmp_path):
+    """Machine B commits straight to the remote branch (standing in for the
+    GitHub API commits the orchestrator makes) -- this clone (machine A)
+    never sees it locally until `ensure()` fetches. Worktree never existed
+    here, so this is the cold-start/fresh-worktree path."""
+    remote = _init_bare_remote(tmp_path)
+    local_clone = _clone(remote, tmp_path / "local")
+
+    machine_b = _clone(remote, tmp_path / "machine-b")
+    branch = branch_name(99)
+    _git(["checkout", "-b", branch], cwd=machine_b)
+    (machine_b / "generated_test.py").write_text("def test_x():\n    assert True\n")
+    _git(["add", "."], cwd=machine_b)
+    _git(["commit", "-m", "tests"], cwd=machine_b)
+    _git(["push", "origin", branch], cwd=machine_b)
+
+    worktrees = WorktreeManager(str(local_clone), str(tmp_path / "worktrees"))
+    path = worktrees.ensure(99)
+
+    assert (Path(path) / "generated_test.py").exists()
+
+
+def test_ensure_bases_a_new_branch_on_fetched_remote_main_not_stale_local_head(tmp_path):
+    """First-ever dispatch for this issue (no remote branch yet), but the
+    remote's `main` has moved on since this clone's last fetch -- the new
+    worktree must be cut from the fetched `origin/main`, not this clone's
+    stale local `main`."""
+    remote = _init_bare_remote(tmp_path)
+    local_clone = _clone(remote, tmp_path / "local")
+
+    machine_b = _clone(remote, tmp_path / "machine-b")
+    (machine_b / "config.txt").write_text("new config\n")
+    _git(["add", "."], cwd=machine_b)
+    _git(["commit", "-m", "advance main"], cwd=machine_b)
+    _git(["push", "origin", "main"], cwd=machine_b)
+
+    worktrees = WorktreeManager(str(local_clone), str(tmp_path / "worktrees"))
+    path = worktrees.ensure(123)
+
+    assert (Path(path) / "config.txt").exists()
+
+
+def test_ensure_without_a_remote_is_unaffected(tmp_path):
+    """No `origin` configured (the existing unit-test repos) -- `ensure()`
+    must behave exactly as before S26: no fetch attempted, branch off local
+    HEAD."""
+    repo = _init_repo(tmp_path)
+    worktrees = WorktreeManager(str(repo), str(tmp_path / "worktrees"))
+
+    path = worktrees.ensure(55)
+
+    assert (Path(path) / "README.md").exists()
