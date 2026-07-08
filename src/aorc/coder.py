@@ -76,6 +76,11 @@ def _tail(text: str, limit: int = 1000) -> str:
     return text if len(text) <= limit else "..." + text[-limit:]
 
 
+def _head(text: str, limit: int = 300) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
 def parse_coder_response(text: str, task_list: list, allowed_files: list) -> CoderDoc | None:
     """Pure schema check, no LLM judgment: `None` on invalid JSON, a missing
     `tasks` list, a count that doesn't match `task_list` one-for-one, any
@@ -196,7 +201,15 @@ class CoderStage:
 
             doc = parse_coder_response(completion.text, design.task_list, design.files)
             if doc is None:
-                failure = "format miss: coder response did not match the required schema"
+                # S34: carry what the model actually returned (and whether the
+                # provider cut it off -- finish_reason) into the retry prompt
+                # and, on exhaustion, the block reason.
+                failure = (
+                    "format miss: coder response did not match the required schema "
+                    '(expected JSON {"tasks": [{"task", "path", "code"}]}); '
+                    f"finish_reason={completion.finish_reason}; "
+                    f"response head: {_head(completion.text)}"
+                )
                 continue
 
             for entry in doc.tasks:

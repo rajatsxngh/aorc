@@ -343,6 +343,24 @@ def test_parse_coder_response_accepts_a_fenced_response():
 # ---- S33: a docker exec infra failure is never a test outcome -------------- #
 
 
+# ---- S34: a format miss must show what the model actually returned -------- #
+
+
+def test_format_miss_reason_includes_response_head_and_finish_reason():
+    """Live blocks showed only 'format miss: ... did not match the required
+    schema' -- useless for diagnosing WHY (truncation? wrong shape? bad
+    paths?). The reason must carry the response head and finish_reason."""
+    prose = "Looking at the task list, I would implement add() as follows: def add(a, b)..."
+    stage, llm, gh, runner = _stage([prose] * 3)
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert "format miss" in result.reason
+    assert "I would implement add()" in result.reason
+    assert "finish_reason=stop" in result.reason
+
+
 def test_coder_hard_fails_immediately_on_infra_failure():
     """A dead exec target must not burn fix-loop attempts feeding daemon
     errors to the coder as if they were failing tests."""
