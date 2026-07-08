@@ -672,6 +672,40 @@ def test_run_issue_subcommand_dispatches_a_single_issue(capsys):
     assert "dispatched issue #7" in capsys.readouterr().out
 
 
+def test_run_issue_prints_pipeline_stage_status_and_reason(capsys):
+    """S31: the CLI must report the driver's outcome -- stage, status, and
+    the block reason -- instead of only claiming 'dispatched'."""
+    from aorc.driver import DriverResult
+
+    collaborators = make_collaborators(
+        issues=[Issue(number=7, title="Do a thing", body="x", labels=[])]
+    )
+    collaborators.github._inner.add_file(
+        "main",
+        ".aorc.yml",
+        "llm:\n  primary: { provider: claude, model: m }\nsetup: x\ntest: y\n",
+    )
+
+    class StubDriver:
+        def run(self, issue_number: int, **kwargs):
+            return DriverResult(
+                status="agent-blocked",
+                stage="in-test",
+                reason="attempt 1: tester response failed schema check",
+            )
+
+    collaborators.loop.driver = StubDriver()
+
+    code = run(["run-issue", "7"], collaborators=collaborators)
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "dispatched issue #7" in out
+    assert "stage=in-test" in out
+    assert "status=agent-blocked" in out
+    assert "attempt 1: tester response failed schema check" in out
+
+
 def test_run_issue_without_config_parks_under_awaiting_config():
     collaborators = make_collaborators(
         issues=[Issue(number=9, title="Do a thing", body="x", labels=[])]

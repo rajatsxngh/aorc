@@ -295,3 +295,36 @@ def test_worktree_sync_happens_again_on_every_fix_loop_attempt(tmp_path):
         "def add(a, b):\n    return a + b\n",
         "def add(a, b):\n    return a - b  # fixed\n",
     ]
+
+
+# ---- S31: blocked results carry the gate + detail that failed ------------- #
+
+
+def test_blocked_by_fix_loop_exhaustion_records_last_failure():
+    failing = RunResult(returncode=1, stdout="AssertionError: assert 4 == 3")
+    stage, llm, gh, runner = _stage([_ONE_TASK] * 3, test_results=[failing] * 3)
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert "3 attempts" in result.reason
+    assert "AssertionError: assert 4 == 3" in result.reason
+
+
+def test_blocked_by_provider_exhaustion_records_provider_reason():
+    errors = [ProviderError("boom")] * 4  # one past max_provider_retries=3
+    stage, llm, gh, runner = _stage(errors)
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert "provider" in result.reason
+
+
+def test_proceed_leaves_reason_empty():
+    stage, llm, gh, runner = _stage([_ONE_TASK], test_results=[RunResult(returncode=0)])
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "proceed"
+    assert result.reason == ""

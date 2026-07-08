@@ -66,6 +66,14 @@ class CoderDoc:
 class CoderResult:
     status: str  # "proceed" | "agent-blocked"
     attempts: int = 0
+    # S31: why the stage blocked (provider exhaustion, or the last attempt's
+    # failure summary) -- empty on "proceed". The only record of the failure.
+    reason: str = ""
+
+
+def _tail(text: str, limit: int = 1000) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else "..." + text[-limit:]
 
 
 def parse_coder_response(text: str, task_list: list, allowed_files: list) -> CoderDoc | None:
@@ -176,7 +184,14 @@ class CoderStage:
                 attempts -= 1  # provider errors never consume the fix-loop counter
                 provider_retries += 1
                 if provider_retries > self._max_provider_retries:
-                    return CoderResult(status="agent-blocked", attempts=attempts)
+                    return CoderResult(
+                        status="agent-blocked",
+                        attempts=attempts,
+                        reason=(
+                            f"provider error: {self._max_provider_retries} retries "
+                            "exhausted without a completion"
+                        ),
+                    )
                 continue
 
             doc = parse_coder_response(completion.text, design.task_list, design.files)
@@ -198,7 +213,10 @@ class CoderStage:
                 return CoderResult(status="proceed", attempts=attempts)
             failure = failing_test_summary(run_result)
 
-        return CoderResult(status="agent-blocked", attempts=attempts)
+        reason = f"fix loop exhausted after {attempts} attempts"
+        if failure:
+            reason += f"; last failure:\n{_tail(failure)}"
+        return CoderResult(status="agent-blocked", attempts=attempts, reason=reason)
 
     def _run_toolchain(self, cwd: str) -> TestRunResult:
         """setup -> test -> lint, from `.aorc.yml` -- never guessed. Stops

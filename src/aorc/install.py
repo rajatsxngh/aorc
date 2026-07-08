@@ -54,7 +54,7 @@ from .dispatch import DEFAULT_CONCURRENCY, select_dispatch
 from .harness import ContainerHandle, ContainerHarness
 from .interfaces import GitHubClient, Issue, LLMClient
 from .pipeline import AWAITING_CONFIG_LABEL, HELD_LABEL, LABEL_COLUMN
-from .wake import WakeLoop, WakeReport
+from .wake import DispatchOutcome, WakeLoop, WakeReport
 
 if TYPE_CHECKING:  # only for annotations; merge.py is a heavier import
     from .credentials import CredentialBroker
@@ -309,7 +309,7 @@ class ConfigGatedWakeLoop(WakeLoop):
 
     # ---- gating ------------------------------------------------------------ #
 
-    def dispatch_issue(self, issue_number: int) -> ContainerHandle | None:
+    def dispatch_issue(self, issue_number: int) -> DispatchOutcome | None:
         status = self._gate.check()
         if status.ready:
             return super().dispatch_issue(issue_number)

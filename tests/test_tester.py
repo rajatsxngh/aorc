@@ -290,3 +290,58 @@ def test_container_test_runner_rejects_a_cwd_it_cannot_resolve(monkeypatch):
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "." in str(exc)
+
+
+# ---- S31: blocked results carry the gate + detail that failed ------------- #
+
+
+def test_blocked_by_parse_gate_records_reason_per_attempt():
+    stage, *_ = _stage(["not json"] * 3, [])
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert "schema" in result.reason
+    assert "attempt 1" in result.reason and "attempt 3" in result.reason
+    assert "not json" in result.reason  # the offending response head
+
+
+def test_blocked_by_interface_coverage_names_the_uncovered_functions():
+    stage, *_ = _stage([_MISSING_REFERENCE] * 3, [])
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert "interface" in result.reason
+    assert "add" in result.reason
+
+
+def test_blocked_by_critic_records_the_critic_reason():
+    stage, *_ = _stage([_ONE_TEST] * 3, [_REJECT] * 3)
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert "critic" in result.reason
+    assert "off-spec" in result.reason
+
+
+def test_blocked_by_classifier_records_verdict_and_output_tail():
+    error = RunResult(returncode=2, stdout="ImportError: No module named 'add'")
+    stage, *_ = _stage([_ONE_TEST] * 3, [_APPROVE] * 3, test_results=[error] * 3)
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert "'error'" in result.reason
+    assert "ImportError: No module named 'add'" in result.reason
+
+
+def test_proceed_leaves_reason_empty():
+    red = RunResult(returncode=1, stdout="AssertionError: assert 4 == 3")
+    stage, *_ = _stage([_ONE_TEST], [_APPROVE], test_results=[red])
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "proceed"
+    assert result.reason == ""

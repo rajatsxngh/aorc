@@ -483,3 +483,42 @@ def test_backfill_respects_existing_in_flight_count():
 def test_issue_for_branch_roundtrip():
     assert issue_for_branch(branch_name(42)) == 42
     assert issue_for_branch("feature/human-branch") is None
+
+
+# --------------------------------------------------------------------------- #
+# S31: dispatch_issue surfaces the driver's result instead of discarding it
+# --------------------------------------------------------------------------- #
+
+
+class ResultDriver:
+    """Driver stub whose `run` returns a real DriverResult, so the loop's
+    outcome plumbing (not the driver) is what's under test."""
+
+    def run(self, issue_number: int, **kwargs):
+        from aorc.driver import DriverResult
+
+        return DriverResult(
+            status="agent-blocked", stage="in-test", reason="attempt 1: boom"
+        )
+
+
+def test_dispatch_issue_returns_the_driver_result_in_its_outcome():
+    loop, gh, runtime, minter, clock = make_loop(issues=[Issue(number=5, body="x")])
+    loop.driver = ResultDriver()
+
+    outcome = loop.dispatch_issue(5)
+
+    assert outcome.handle.issue_number == 5
+    assert outcome.result is not None
+    assert outcome.result.status == "agent-blocked"
+    assert outcome.result.stage == "in-test"
+    assert outcome.result.reason == "attempt 1: boom"
+
+
+def test_dispatch_issue_without_driver_returns_an_outcome_with_no_result():
+    loop, gh, runtime, minter, clock = make_loop(issues=[Issue(number=5, body="x")])
+
+    outcome = loop.dispatch_issue(5)
+
+    assert outcome.handle is not None
+    assert outcome.result is None

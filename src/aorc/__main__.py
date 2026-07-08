@@ -387,9 +387,17 @@ def run(argv: list[str] | None = None, *, collaborators: Collaborators | None = 
         # `ConfigGatedWakeLoop.dispatch_issue` returns None when the config
         # gate is closed: the issue was parked under awaiting-config and no
         # container was started, so don't claim otherwise.
-        handle = loop.dispatch_issue(args.issue_number)
-        if handle is not None:
+        outcome = loop.dispatch_issue(args.issue_number)
+        if outcome is not None:
             print(f"dispatched issue #{args.issue_number}")
+            # S31: surface the pipeline's outcome -- before this, the
+            # DriverResult was discarded and a blocked stage looked identical
+            # to a clean run.
+            if outcome.result is not None:
+                result = outcome.result
+                print(f"pipeline: stage={result.stage} status={result.status}")
+                if result.reason:
+                    print(f"reason:\n{result.reason}")
         else:
             print(f"parked issue #{args.issue_number} (awaiting-config)")
     elif args.command == "serve":

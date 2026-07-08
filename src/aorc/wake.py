@@ -67,7 +67,7 @@ from .triage import triage
 if TYPE_CHECKING:  # annotation only -- driver.py imports several stage
     # modules that don't need to be a hard runtime dependency of every
     # WakeLoop user (e.g. the zero-dep unit suite building a bare loop).
-    from .driver import PipelineDriver
+    from .driver import DriverResult, PipelineDriver
 
 _BRANCH_RE = re.compile(r"^aorc/issue-(\d+)$")
 
@@ -155,6 +155,18 @@ def rebuild_state(github: GitHubClient) -> WakeState:
 # --------------------------------------------------------------------------- #
 # The wake loop
 # --------------------------------------------------------------------------- #
+
+
+@dataclass
+class DispatchOutcome:
+    """S31: one dispatch's full outcome -- the started container handle plus
+    the build-pipeline driver's result. `result` is None when no driver is
+    configured (the pre-S22 mint-and-start behavior); before S31 the driver's
+    `DriverResult` was discarded here, which left `run-issue` printing
+    "dispatched" with no way to see why a stage blocked."""
+
+    handle: ContainerHandle
+    result: "DriverResult | None" = None
 
 
 @dataclass
@@ -319,7 +331,7 @@ class WakeLoop:
         the awaiting-config queue)."""
         return HELD_LABEL in issue.labels or bool(current_pipeline_label(issue.labels))
 
-    def dispatch_issue(self, issue_number: int) -> ContainerHandle:
+    def dispatch_issue(self, issue_number: int) -> DispatchOutcome:
         """The only dispatch path: mint -> broker-built env -> harness. No
         hand-built env dict exists anywhere in the loop.
 
@@ -341,9 +353,10 @@ class WakeLoop:
         env = self._broker.container_env(token)
         handle = self.harness.dispatch(issue_number, env)
         self.in_flight[issue_number] = (handle, token)
+        result = None
         if self.driver is not None:
-            self.driver.run(issue_number)
-        return handle
+            result = self.driver.run(issue_number)
+        return DispatchOutcome(handle=handle, result=result)
 
     def hold(self, issue_number: int) -> None:
         self.github.add_label(issue_number, HELD_LABEL)

@@ -405,3 +405,38 @@ def test_driver_resume_at_in_code_with_fresh_worktree_sees_earlier_committed_tes
     assert result.status == "proceed"
     cwd = worktrees.ensure(1)
     assert (Path(cwd) / "aorc" / "issue-1" / "test_generated.py").exists()
+
+
+# ---- S31: blocking posts the stage + reason to the issue ------------------- #
+
+
+def test_blocked_tester_posts_stage_and_reason_comment(tmp_path):
+    driver, gh, llms, runner = _build_driver(
+        tmp_path, tester_responses=["not json", "not json", "not json"]
+    )
+
+    result = driver.run(1)
+
+    assert result.status == "agent-blocked"
+    assert result.stage == "in-test"
+    assert "schema" in result.reason
+    bodies = [c.body for c in gh.list_comments(1)]
+    block_notes = [b for b in bodies if BLOCKED_LABEL in b]
+    assert block_notes, "blocking must post an explanatory comment"
+    assert any("in-test" in b and "schema" in b for b in block_notes)
+
+
+def test_blocked_coder_posts_stage_and_reason_comment(tmp_path):
+    driver, gh, llms, runner = _build_driver(
+        tmp_path,
+        coder_responses=["garbage", "garbage", "garbage"],
+        test_results=[RunResult(returncode=1, stdout="AssertionError")],
+    )
+
+    result = driver.run(1)
+
+    assert result.status == "agent-blocked"
+    assert result.stage == "in-code"
+    assert result.reason
+    bodies = [c.body for c in gh.list_comments(1)]
+    assert any("in-code" in b and BLOCKED_LABEL in b for b in bodies)

@@ -63,12 +63,19 @@ from .tester import TesterStage
 
 CLARIFICATION_LABEL = "needs-clarification"
 
+# S31: blocking posts an explanatory comment (same pattern as
+# `harness.enforce_wall_clock`'s wall-clock ping) -- greppable marker first.
+BLOCKED_PING_MARKER = "<!-- aorc:blocked-ping -->"
+
 
 @dataclass
 class DriverResult:
     status: str  # "proceed" | "needs-clarification" | "agent-blocked" | a terminal label
     stage: str | None = None
     pr: PullRequest | None = None
+    # S31: the blocking stage's own account of what failed -- empty unless
+    # status is "agent-blocked".
+    reason: str = ""
 
 
 class PipelineDriver:
@@ -123,8 +130,9 @@ class PipelineDriver:
                     self._github.set_board_column(issue_number, LABEL_COLUMN[CLARIFICATION_LABEL])
                     return DriverResult(status="needs-clarification", stage="in-design")
                 if result.status == "agent-blocked":
-                    self._block(issue_number)
-                    return DriverResult(status="agent-blocked", stage="in-design")
+                    reason = f"design stage returned agent-blocked after {result.attempts} attempts"
+                    self._block(issue_number, "in-design", reason)
+                    return DriverResult(status="agent-blocked", stage="in-design", reason=reason)
                 design_doc = result.doc
                 label = self._state_machine.advance(issue_number)  # -> "in-test"
 
@@ -137,8 +145,8 @@ class PipelineDriver:
             else:
                 result = self._tester.run(issue_number, design_doc, cwd=cwd)
                 if result.status != "proceed":
-                    self._block(issue_number)
-                    return DriverResult(status="agent-blocked", stage="in-test")
+                    self._block(issue_number, "in-test", result.reason)
+                    return DriverResult(status="agent-blocked", stage="in-test", reason=result.reason)
                 label = self._state_machine.advance(issue_number)  # -> "in-code"
 
         if label == "in-code":
@@ -146,8 +154,8 @@ class PipelineDriver:
             # always run it rather than trust a bygone-presence check.
             result = self._coder.run(issue_number, design_doc, cwd=cwd)
             if result.status != "proceed":
-                self._block(issue_number)
-                return DriverResult(status="agent-blocked", stage="in-code")
+                self._block(issue_number, "in-code", result.reason)
+                return DriverResult(status="agent-blocked", stage="in-code", reason=result.reason)
             label = self._state_machine.advance(issue_number)  # -> "in-review"
 
         if label == "in-review":
@@ -170,6 +178,11 @@ class PipelineDriver:
                 return pr
         return None
 
-    def _block(self, issue_number: int) -> None:
+    def _block(self, issue_number: int, stage: str, reason: str) -> None:
         self._github.add_label(issue_number, BLOCKED_LABEL)
         self._github.set_board_column(issue_number, LABEL_COLUMN[BLOCKED_LABEL])
+        self._github.post_comment(
+            issue_number,
+            f"{BLOCKED_PING_MARKER}\nStopping: stage `{stage}` failed. Labeling "
+            f"`{BLOCKED_LABEL}`.\nReason:\n{reason or '(no reason recorded)'}",
+        )

@@ -101,6 +101,20 @@ class TesterResult:
     status: str  # "proceed" | "agent-blocked"
     code: str | None = None
     attempts: int = 0
+    # S31: which gate failed and why, one line per attempt -- empty on
+    # "proceed". This is the only record of the failure; nothing else in the
+    # loop logs or raises.
+    reason: str = ""
+
+
+def _snippet(text: str, limit: int = 200) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _output_tail(result: TestRunResult, limit: int = 400) -> str:
+    combined = (result.stdout + result.stderr).strip()
+    return combined if len(combined) <= limit else "..." + combined[-limit:]
 
 
 def parse_tester_response(text: str, task_list: list) -> TesterDoc | None:
@@ -142,13 +156,17 @@ def _referenced_names(code: str) -> set[str]:
     return set(re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", code))
 
 
+def uncovered_interface_names(interface: list, code: str) -> set[str]:
+    """The design-interface functions the test code never references --
+    empty means the coverage gate passes."""
+    names = {item["name"] for item in interface if isinstance(item, dict) and "name" in item}
+    return names - _referenced_names(code)
+
+
 def interface_coverage_gate(interface: list, code: str) -> bool:
     """Pure static set-comparison, no execution: design interface functions
     must be a subset of the functions the test code references."""
-    names = {item["name"] for item in interface if isinstance(item, dict) and "name" in item}
-    if not names:
-        return True
-    return names <= _referenced_names(code)
+    return not uncovered_interface_names(interface, code)
 
 
 def classify_test_run(result: TestRunResult) -> str:
@@ -281,30 +299,53 @@ class TesterStage:
 
     def run(self, issue_number: int, design: DesignDoc, *, cwd: str = ".") -> TesterResult:
         attempts = 0
+        reasons: list[str] = []  # S31: one line per failed attempt
         for attempts in range(1, self._max_retries + 1):
             completion = self._tester_llm.complete(self._tester_messages(design))
             doc = parse_tester_response(completion.text, design.task_list)
             if doc is None:
+                reasons.append(
+                    f"attempt {attempts}: tester response failed schema check "
+                    f"(expected JSON with exactly {len(design.task_list)} tests); "
+                    f"response head: {_snippet(completion.text)}"
+                )
                 continue  # format miss -- retry the tester
 
-            if not interface_coverage_gate(design.interface, doc.code):
+            uncovered = uncovered_interface_names(design.interface, doc.code)
+            if uncovered:
+                reasons.append(
+                    f"attempt {attempts}: interface coverage gate failed; "
+                    f"uncovered interface names: {', '.join(sorted(uncovered))}"
+                )
                 continue  # shallow suite -- retry the tester
 
             critic_completion = self._critic_llm.complete(self._critic_messages(design, doc.code))
             verdict = parse_critic_response(critic_completion.text)
-            if verdict is None or verdict.verdict == "reject":
-                continue  # off-spec (or critic format miss) -- retry the tester
+            if verdict is None:
+                reasons.append(
+                    f"attempt {attempts}: critic response failed schema check; "
+                    f"response head: {_snippet(critic_completion.text)}"
+                )
+                continue
+            if verdict.verdict == "reject":
+                reasons.append(f"attempt {attempts}: critic rejected tests: {verdict.reason}")
+                continue  # off-spec -- retry the tester
 
             self._commit(issue_number, doc.code)
             # S22 split-brain fix: same ordering pin as `CoderStage` -- mirror
             # the committed test source into `cwd` before the toolchain runs.
             write_worktree_file(cwd, generated_test_path(issue_number), doc.code)
             run_result = self._test_runner.run(cwd, self._test_command)
-            if classify_test_run(run_result) == "red":
+            classification = classify_test_run(run_result)
+            if classification == "red":
                 return TesterResult(status="proceed", code=doc.code, attempts=attempts)
             # error/crash (or an unexpected green) -- back to tester/design
+            reasons.append(
+                f"attempt {attempts}: test run classified {classification!r} (need 'red'); "
+                f"returncode={run_result.returncode}; output tail: {_output_tail(run_result)}"
+            )
 
-        return TesterResult(status="agent-blocked", code=None, attempts=attempts)
+        return TesterResult(status="agent-blocked", code=None, attempts=attempts, reason="\n".join(reasons))
 
     def _commit(self, issue_number: int, code: str) -> None:
         branch = branch_name(issue_number)
