@@ -573,6 +573,13 @@ class ContainerHarness:
     def checkpoint(self, report: CheckpointReport) -> str:
         return self._checkpoint.verdict(report)
 
+    def adopt_registry(self, registry: InFlightRegistry) -> None:
+        """S43: swap in a registry rebuilt from GitHub
+        (`design.rebuild_in_flight_registry`) at the start of a wake/backfill
+        -- the in-process one dies with the orchestrator, so collision
+        detection across a restart depends on this."""
+        self._checkpoint.registry = registry
+
     def teardown(self, handle: ContainerHandle, outcome: str) -> None:
         self._runtime.teardown(handle)
         self._checkpoint.registry.clear(handle.issue_number)

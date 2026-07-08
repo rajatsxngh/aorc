@@ -44,19 +44,22 @@ branches rather than a dedicated teardown call (the driver does not own a
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from .coder import CoderStage
 from .design import (
     DesignDoc,
     DesignStage,
+    checkpoint_report,
     design_doc_path,
     parse_design_response,
     resolve_design_files,
 )
 from .guards import BLOCKED_LABEL
-from .harness import WorktreeManager
+from .harness import CheckpointReport, WorktreeManager
 from .interfaces import GitHubClient, PullRequest
 from .pipeline import (
+    HELD_LABEL,
     TERMINAL_LABELS,
     ArtifactChecker,
     LABEL_COLUMN,
@@ -73,10 +76,15 @@ CLARIFICATION_LABEL = "needs-clarification"
 # `harness.enforce_wall_clock`'s wall-clock ping) -- greppable marker first.
 BLOCKED_PING_MARKER = "<!-- aorc:blocked-ping -->"
 
+# S43: a checkpoint hold posts one explanatory comment; deduped by marker so
+# the sweep's release -> re-hold cycle (every wake, until the collision
+# clears) doesn't spam the issue.
+HELD_PING_MARKER = "<!-- aorc:checkpoint-hold -->"
+
 
 @dataclass
 class DriverResult:
-    status: str  # "proceed" | "needs-clarification" | "agent-blocked" | a terminal label
+    status: str  # "proceed" | "needs-clarification" | "agent-blocked" | "held" | a terminal label
     stage: str | None = None
     pr: PullRequest | None = None
     # S31: the blocking stage's own account of what failed -- empty unless
@@ -100,6 +108,7 @@ class PipelineDriver:
         *,
         state_machine: PipelineStateMachine | None = None,
         artifacts: ArtifactChecker | None = None,
+        checkpoint: Callable[[CheckpointReport], str] | None = None,
     ) -> None:
         self._github = github
         self._worktrees = worktrees
@@ -109,6 +118,12 @@ class PipelineDriver:
         self._reviewer = reviewer
         self._artifacts = artifacts or ArtifactChecker(github)
         self._state_machine = state_machine or PipelineStateMachine(github, self._artifacts)
+        # S43: the S4/S10 post-design collision gate. MUST be the shared
+        # harness's `ContainerHarness.checkpoint` in production (compose wires
+        # it) so every driver run records claims into -- and checks against --
+        # the same `InFlightRegistry`; a driver-private checkpoint would look
+        # at an empty registry and never detect anything (live issues 24/25).
+        self._checkpoint = checkpoint
 
     def run(self, issue_number: int, *, qa: list[str] | None = None) -> DriverResult:
         issue = self._github.get_issue(issue_number)
@@ -154,6 +169,21 @@ class PipelineDriver:
             # fails loudly (live issue 21).
             design_doc.files = resolve_design_files(design_doc.files, cwd)
 
+        if design_doc is not None and self._checkpoint is not None:
+            # S43: the post-design checkpoint. Runs on every entry with a
+            # design doc (fresh or resumed) -- the collision picture can
+            # change between wakes, and the issue's own open PR is excluded
+            # from the collision set, so a clean resume always proceeds. On
+            # "proceed" the verdict records this issue's claim in the shared
+            # registry, which is exactly what the NEXT dispatch checks.
+            if self._checkpoint(checkpoint_report(issue_number, design_doc)) == "hold":
+                reason = (
+                    f"files {sorted(design_doc.files)} overlap another in-flight "
+                    "issue's claimed files or an open AORC PR's changed files"
+                )
+                self._hold(issue_number, reason)
+                return DriverResult(status="held", stage="checkpoint", reason=reason)
+
         if label == "in-test":
             if self._artifacts.tests_committed(issue_number):
                 label = self._state_machine.advance(issue_number)  # -> "in-code"
@@ -192,6 +222,17 @@ class PipelineDriver:
             if pr.head == head:
                 return pr
         return None
+
+    def _hold(self, issue_number: int, reason: str) -> None:
+        self._github.add_label(issue_number, HELD_LABEL)
+        self._github.set_board_column(issue_number, LABEL_COLUMN[HELD_LABEL])
+        comments = self._github.list_comments(issue_number)
+        if not any(HELD_PING_MARKER in c.body for c in comments):
+            self._github.post_comment(
+                issue_number,
+                f"{HELD_PING_MARKER}\nHolding at the post-design checkpoint: {reason}. "
+                "The merge-time sweep re-evaluates this issue on every wake.",
+            )
 
     def _block(self, issue_number: int, stage: str, reason: str) -> None:
         self._github.add_label(issue_number, BLOCKED_LABEL)

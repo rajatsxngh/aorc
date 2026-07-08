@@ -53,6 +53,7 @@ from .credentials import (
     ScrubbingGitHubClient,
     handle_token_expiry,
 )
+from .design import rebuild_in_flight_registry
 from .dispatch import DEFAULT_CONCURRENCY, select_dispatch
 from .harness import ContainerHandle, ContainerHarness, ContainerRuntime
 from .interfaces import GitHubClient, Issue, LLMClient
@@ -280,6 +281,7 @@ class WakeLoop:
         report = WakeReport()
         report.requeued = self._expiry_pass(now)
         state = rebuild_state(self.github)
+        self._adopt_in_flight_claims(state)
         report.released = self._sweep_held(state.held)
         return report
 
@@ -290,6 +292,7 @@ class WakeLoop:
         at a time; declared-blocked ones are held for the sweep to release."""
         if self._llm is None:
             raise ValueError("backfill requires an LLMClient to run triage")
+        self._adopt_in_flight_claims(rebuild_state(self.github))
         report = BackfillReport()
         candidates: list[Issue] = []
         for issue in self.github.list_issues("open"):
@@ -319,6 +322,16 @@ class WakeLoop:
         return report
 
     # ---- the pieces -------------------------------------------------------- #
+
+    def _adopt_in_flight_claims(self, state: WakeState) -> None:
+        """S43: rebuild the checkpoint's in-flight registry from the committed
+        design docs of everything mid-pipeline, before anything dispatches.
+        The in-process registry dies with the orchestrator (stateless-by-
+        design), so without this a restarted process's collision check would
+        look at an empty registry and never detect anything."""
+        self.harness.adopt_registry(
+            rebuild_in_flight_registry([i.number for i in state.in_pipeline], self.github)
+        )
 
     def _route_not_ready(self, issue: Issue, result) -> None:
         """Hook: what to do with a not-ready triage verdict during backfill.
@@ -356,6 +369,14 @@ class WakeLoop:
         result = None
         if self.driver is not None:
             result = self.driver.run(issue_number)
+            if result is not None and result.status == "held":
+                # S43: a checkpoint hold ends this build attempt. Tear down
+                # through the branch-preserving path (design doc survives on
+                # the branch; teardown also drops the claim the hold verdict
+                # recorded) and free the slot -- a held issue left in
+                # `in_flight` would be skipped by `_sweep_held` forever.
+                del self.in_flight[issue_number]
+                self.harness.teardown(handle, "held")
         return DispatchOutcome(handle=handle, result=result)
 
     def hold(self, issue_number: int) -> None:

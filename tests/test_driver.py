@@ -11,10 +11,10 @@ from aorc.design import DesignDoc, DesignStage, design_doc_path
 from aorc.driver import PipelineDriver
 from aorc.github.mock import MockGitHubClient
 from aorc.guards import BLOCKED_LABEL
-from aorc.harness import WorktreeManager
+from aorc.harness import Checkpoint, WorktreeManager
 from aorc.interfaces import Issue
 from aorc.llm.mock import MockLLMClient
-from aorc.pipeline import branch_name
+from aorc.pipeline import HELD_LABEL, branch_name
 from aorc.reviewer import ReviewerStage
 from aorc.tester import (
     MockTestRunner,
@@ -74,6 +74,7 @@ def _build_driver(
     reviewer_responses=None,
     test_results=None,
     issues=None,
+    with_checkpoint=False,
 ):
     gh = MockGitHubClient(issues=issues or [Issue(number=1, body="add two numbers")])
     llms = {
@@ -88,7 +89,10 @@ def _build_driver(
     tester = TestStage(llms["tester"], llms["critic"], gh, runner)
     coder = CoderStage(llms["coder"], gh, runner)
     reviewer = ReviewerStage(llms["reviewer"], coder, gh, runner)
-    driver = PipelineDriver(gh, FakeWorktrees(str(tmp_path)), design, tester, coder, reviewer)
+    checkpoint = Checkpoint(github=gh).verdict if with_checkpoint else None
+    driver = PipelineDriver(
+        gh, FakeWorktrees(str(tmp_path)), design, tester, coder, reviewer, checkpoint=checkpoint
+    )
     return driver, gh, llms, runner
 
 
@@ -460,6 +464,57 @@ def test_unqualified_design_file_path_is_resolved_before_the_tester_runs(tmp_pat
     stub_target = gh.get_file("src/sandbox/math_utils.py", branch_name(1))
     assert stub_target is not None and "divide" in stub_target
     assert gh.get_file("math_utils.py", branch_name(1)) is None
+
+
+# ---- S43: post-design checkpoint -- live multi-issue collision repro ------- #
+
+
+def test_second_issue_touching_same_file_is_held_at_checkpoint(tmp_path):
+    """The live issues-24/25 repro at the driver level: two issues whose
+    design docs claim the same file, run through the SAME checkpoint (as the
+    live loop's shared harness provides). The first proceeds and records its
+    claim; the second must hold at the post-design checkpoint -- never reach
+    the tester."""
+    driver, gh, llms, runner = _build_driver(
+        tmp_path,
+        issues=[
+            Issue(number=1, body="add two numbers"),
+            Issue(number=2, body="add two numbers, again"),
+        ],
+        design_responses=[_DESIGN_JSON, _DESIGN_JSON],  # both claim src/aorc/add.py
+        with_checkpoint=True,
+    )
+
+    first = driver.run(1)
+    assert first.status == "proceed"
+
+    second = driver.run(2)
+
+    assert second.status == "held"
+    assert HELD_LABEL in gh.get_labels(2)
+    assert len(llms["tester"].calls) == 1  # only issue 1's tester ever ran
+    bodies = [c.body for c in gh.list_comments(2)]
+    assert any("checkpoint" in b.lower() for b in bodies), "hold must leave a breadcrumb"
+
+
+def test_checkpoint_holds_on_open_aorc_pr_files_even_with_empty_registry(tmp_path):
+    """Restart analog: the in-process registry is empty (fresh orchestrator),
+    but another issue's unmerged AORC PR already occupies the file. The
+    checkpoint's open-PR scan must hold the newcomer."""
+    driver, gh, llms, runner = _build_driver(
+        tmp_path,
+        issues=[Issue(number=2, body="add two numbers, again")],
+        design_responses=[_DESIGN_JSON],
+        with_checkpoint=True,
+    )
+    pr = gh.open_pull_request(title="AORC: issue #1", body="x", head=branch_name(1))
+    pr.files = ["src/aorc/add.py"]
+
+    result = driver.run(2)
+
+    assert result.status == "held"
+    assert HELD_LABEL in gh.get_labels(2)
+    assert len(llms["tester"].calls) == 0
 
 
 # ---- S31: blocking posts the stage + reason to the issue ------------------- #

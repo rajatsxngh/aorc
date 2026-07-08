@@ -291,6 +291,11 @@ def compose(
             ),
             coder_stage,
             reviewer_stage,
+            # S43: the post-design collision gate MUST be the loop harness's
+            # own checkpoint -- same instance, same in-flight registry --
+            # or every driver run checks an empty registry (live issues
+            # 24/25: two issues editing the same file both ran to review).
+            checkpoint=loop.harness.checkpoint,
         )
     loop.driver = driver
     if merge_handler is None:

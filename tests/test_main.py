@@ -217,6 +217,26 @@ def test_compose_attaches_a_pipeline_driver_when_setup_and_test_are_configured()
     assert collaborators.loop.driver is collaborators.driver
 
 
+def test_compose_wires_the_drivers_checkpoint_to_the_shared_harness():
+    """S43: the driver's post-design collision checkpoint must be the SAME
+    checkpoint (same in-flight registry) the loop's harness owns -- a
+    per-driver registry would always be empty and never detect anything
+    (the live issues-24/25 collision miss)."""
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+    )
+    assert collaborators.driver._checkpoint == collaborators.loop.harness.checkpoint
+
+
 def test_compose_materializes_the_target_clone_for_real_worktrees(monkeypatch):
     """S35: when compose() must build a real WorktreeManager, repo_dir is
     first resolved to a checkout of the TARGET repo (the live bug: '.' was

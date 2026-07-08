@@ -522,3 +522,126 @@ def test_dispatch_issue_without_driver_returns_an_outcome_with_no_result():
 
     assert outcome.handle is not None
     assert outcome.result is None
+
+
+# --------------------------------------------------------------------------- #
+# S43: post-design collision checkpoint wired into the live dispatch path
+# --------------------------------------------------------------------------- #
+
+
+class HeldDriver:
+    """Driver stub returning a checkpoint hold, so the loop's held-teardown
+    plumbing (not the driver) is what's under test."""
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def run(self, issue_number: int, **kwargs):
+        from aorc.driver import DriverResult
+
+        self.calls.append(issue_number)
+        return DriverResult(status="held", stage="checkpoint")
+
+
+def test_dispatch_issue_tears_down_container_on_held_result():
+    """A checkpoint hold must not leave the container in `in_flight` --
+    otherwise `_sweep_held` skips the issue forever -- and must go through
+    the branch-preserving teardown (never delete_branch)."""
+    loop, gh, runtime, minter, clock = make_loop(issues=[Issue(number=5, body="Task.")])
+    loop.driver = HeldDriver()
+
+    outcome = loop.dispatch_issue(5)
+
+    assert outcome.result.status == "held"
+    assert 5 not in loop.in_flight
+    assert ("teardown", 5) in runtime.calls
+    assert not any(call[0] == "delete_branch" for call in gh.calls)
+
+
+import json as _json
+
+from aorc.coder import CoderStage
+from aorc.design import DesignStage, design_doc_path
+from aorc.driver import PipelineDriver
+from aorc.reviewer import ReviewerStage
+from aorc.tester import MockTestRunner, TesterStage as TestStage
+
+_DESIGN_SUBTRACT = _json.dumps(
+    {
+        "interface": [{"name": "subtract", "inputs": ["a", "b"], "outputs": "int"}],
+        "test_specs": ["subtract(3, 1) == 2"],
+        "task_list": ["implement subtract()"],
+        "files": ["math_utils.py"],
+        "confidence": 0.9,
+    }
+)
+_DESIGN_POWER = _json.dumps(
+    {
+        "interface": [{"name": "power", "inputs": ["a", "b"], "outputs": "int"}],
+        "test_specs": ["power(2, 3) == 8"],
+        "task_list": ["implement power()"],
+        "files": ["math_utils.py"],
+        "confidence": 0.9,
+    }
+)
+
+
+def _checkpointed_driver(loop, design_responses):
+    """A real PipelineDriver wired to the loop's shared harness checkpoint --
+    the exact live composition. Tester/coder/reviewer LLMs get no responses:
+    a held issue must stop before ever reaching them."""
+    gh = loop.github
+    runner = MockTestRunner(results=[])
+    coder = CoderStage(MockLLMClient(responses=[]), gh, runner)
+    return PipelineDriver(
+        gh,
+        FakeWorktrees(),
+        DesignStage(MockLLMClient(responses=design_responses), gh),
+        TestStage(MockLLMClient(responses=[]), MockLLMClient(responses=[]), gh, runner),
+        coder,
+        ReviewerStage(MockLLMClient(responses=[]), coder, gh, runner),
+        checkpoint=loop.harness.checkpoint,
+    )
+
+
+def test_backfill_rebuilds_registry_and_holds_colliding_new_issue():
+    """The live issues-24/25 bug across an orchestrator restart: issue 4 is
+    mid-pipeline (committed design doc claims math_utils.py) but this fresh
+    process has no in-memory record of it. Backfill must rebuild the
+    registry from GitHub before dispatching, so issue 6 -- whose design
+    claims the same file -- is held at the checkpoint, not run to review."""
+    issues = [
+        Issue(number=4, body="add subtract to math_utils", labels=["in-test"]),
+        Issue(number=6, body="add power to math_utils"),
+    ]
+    llm = MockLLMClient(default="actionable")
+    loop, gh, runtime, minter, clock = make_loop(issues=issues, llm=llm)
+    gh.add_file(branch_name(4), design_doc_path(4), _DESIGN_SUBTRACT)
+    loop.driver = _checkpointed_driver(loop, design_responses=[_DESIGN_POWER])
+
+    report = loop.backfill()
+
+    assert report.dispatched == [6]  # the selector still dispatches it...
+    assert HELD_LABEL in gh.get_labels(6)  # ...but the checkpoint holds it
+    assert 6 not in loop.in_flight
+    assert ("teardown", 6) in runtime.calls
+
+
+def test_wake_sweep_rebuilds_registry_and_reholds_colliding_held_issue():
+    """A held issue released by the sweep must re-clear the checkpoint: with
+    issue 4 still mid-pipeline claiming math_utils.py, releasing issue 6
+    (same file) re-holds it instead of running it to review."""
+    issues = [
+        Issue(number=4, body="add subtract to math_utils", labels=["in-test"]),
+        Issue(number=6, body="add power to math_utils", labels=[HELD_LABEL]),
+    ]
+    loop, gh, runtime, minter, clock = make_loop(issues=issues)
+    gh.add_file(branch_name(4), design_doc_path(4), _DESIGN_SUBTRACT)
+    loop.driver = _checkpointed_driver(loop, design_responses=[_DESIGN_POWER])
+
+    report = loop.wake()
+
+    assert report.released == [6]
+    assert HELD_LABEL in gh.get_labels(6)
+    assert 6 not in loop.in_flight
+    assert ("teardown", 6) in runtime.calls
