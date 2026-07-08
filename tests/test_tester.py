@@ -57,35 +57,35 @@ def _stage(tester_responses, critic_responses, test_results=None, **kwargs):
 
 
 def test_parse_tester_response_valid():
-    doc = parse_tester_response(_ONE_TEST, _DESIGN.task_list)
+    doc = parse_tester_response(_ONE_TEST)
     assert doc is not None
     assert "assert add(1, 2) == 3" in doc.code
 
 
-def test_parse_tester_response_tolerates_a_count_mismatch():
-    """S32: 'exactly N tests' was brittle against real Claude (which often
-    splits or merges tests) -- coverage is enforced by the interface gate,
-    not by count."""
+def test_parse_tester_response_accepts_any_number_of_valid_tests():
+    """S32/S36: count checks against the design are gone entirely (the
+    task_list parameter is dead) -- the parser enforces shape only;
+    coverage is the interface gate's job."""
     two_tests = json.dumps(
-        {"tests": [{"task": "a", "code": "def test_a():\n    assert add(1, 2) == 3\n"},
-                   {"task": "b", "code": "def test_b():\n    assert add(0, 0) == 0\n"}]}
+        {"tests": [{"spec": "a", "code": "def test_a():\n    assert add(1, 2) == 3\n"},
+                   {"spec": "b", "code": "def test_b():\n    assert add(0, 0) == 0\n"}]}
     )
-    doc = parse_tester_response(two_tests, _DESIGN.task_list)
+    doc = parse_tester_response(two_tests)
     assert doc is not None
     assert "test_a" in doc.code and "test_b" in doc.code
 
 
 def test_parse_tester_response_empty_tests_list_is_format_miss():
-    assert parse_tester_response(json.dumps({"tests": []}), _DESIGN.task_list) is None
+    assert parse_tester_response(json.dumps({"tests": []})) is None
 
 
 def test_parse_tester_response_invalid_json_is_format_miss():
-    assert parse_tester_response("not json", _DESIGN.task_list) is None
+    assert parse_tester_response("not json") is None
 
 
 def test_parse_tester_response_empty_code_is_format_miss():
     bad = json.dumps({"tests": [{"task": "implement add()", "code": ""}]})
-    assert parse_tester_response(bad, _DESIGN.task_list) is None
+    assert parse_tester_response(bad) is None
 
 
 def test_parse_critic_response_valid():
@@ -99,12 +99,12 @@ def test_parse_critic_response_invalid_verdict_is_format_miss():
 
 
 def test_interface_coverage_gate_true_when_all_referenced():
-    doc = parse_tester_response(_ONE_TEST, _DESIGN.task_list)
+    doc = parse_tester_response(_ONE_TEST)
     assert interface_coverage_gate(_DESIGN.interface, doc.code) is True
 
 
 def test_interface_coverage_gate_false_when_design_fn_not_referenced():
-    doc = parse_tester_response(_MISSING_REFERENCE, _DESIGN.task_list)
+    doc = parse_tester_response(_MISSING_REFERENCE)
     assert interface_coverage_gate(_DESIGN.interface, doc.code) is False
 
 
@@ -364,7 +364,7 @@ def test_proceed_leaves_reason_empty():
 
 def test_parse_tester_response_accepts_a_fenced_response():
     fenced = f"Here are the tests:\n```json\n{_ONE_TEST}\n```"
-    doc = parse_tester_response(fenced, _DESIGN.task_list)
+    doc = parse_tester_response(fenced)
     assert doc is not None
     assert "assert add(1, 2) == 3" in doc.code
 
@@ -385,6 +385,47 @@ def test_stage_proceeds_end_to_end_with_fenced_llm_responses():
 
     assert result.status == "proceed"
     assert result.attempts == 1
+
+
+# ---- S36: tester keyed to test_specs; critic feedback drives the retry ----- #
+
+
+def test_tester_prompt_carries_test_specs_and_interface_but_never_task_list():
+    """The tester's contract is the design's observable behaviors
+    (test_specs) + callable surface (interface). task_list is the coder's
+    implementation plan -- sending it made the tester write file-plumbing
+    tests the critic then (correctly) rejected, forever."""
+    red = RunResult(returncode=1, stdout="AssertionError: assert 4 == 3")
+    stage, tester_llm, *_ = _stage([_ONE_TEST], [_APPROVE], test_results=[red])
+
+    stage.run(1, _DESIGN)
+
+    messages, _ = tester_llm.calls[0]
+    system, user = messages[0].content, messages[1].content
+    assert "task_list" not in system
+    assert "test_specs" in system
+    assert "task_list" not in user
+    assert "implement add()" not in user  # the task_list entry's text
+    assert "add(1, 2) == 3" in user  # the test_specs entry's text
+
+
+def test_critic_rejection_reason_feeds_the_next_tester_attempt():
+    """S36: retries were blind -- identical prompt in, identical tests out,
+    identical rejection, 3x. The critic's reason now rides the retry
+    prompt, same pattern as the coder's failure slot."""
+    red = RunResult(returncode=1, stdout="AssertionError: assert 4 == 3")
+    stage, tester_llm, *_ = _stage(
+        [_ONE_TEST, _ONE_TEST], [_REJECT, _APPROVE], test_results=[red]
+    )
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "proceed"
+    assert result.attempts == 2
+    first_user = tester_llm.calls[0][0][1].content
+    second_user = tester_llm.calls[1][0][1].content
+    assert "off-spec" not in first_user  # _REJECT's reason
+    assert "off-spec" in second_user
 
 
 # ---- S33: a docker exec infra failure is never a test outcome -------------- #

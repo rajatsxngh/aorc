@@ -2,10 +2,12 @@
 
 The spec-encoding stages, kept strictly separate from implementation.
 
-- The tester agent writes one failing test per design `task_list` entry,
-  built only from the design doc's `interface`/`task_list`/`test_specs` --
-  never repo files or implementation code, so it tests behavior, not
-  internals.
+- The tester agent writes one failing test per design `test_specs` entry
+  (S36 -- previously keyed to `task_list`, whose implementation steps like
+  "open or create <file>" produced file-plumbing tests the critic then
+  correctly rejected, forever), built only from the design doc's
+  `interface`/`test_specs` -- never `task_list` (the coder's contract),
+  repo files, or implementation code, so it tests behavior, not internals.
 - The test-critic agent is a *distinct* `LLMClient` (no incentive to pass
   its own work) that reviews those tests against the design doc before the
   coder ever runs.
@@ -59,11 +61,13 @@ _INFRA_MARKERS = (
 _TESTER_SYSTEM_PROMPT = (
     "You are the tester agent for a software issue. You write failing "
     "tests -- you never see or write implementation code. Given the "
-    "design doc's `interface`, `task_list`, and `test_specs`, produce a "
-    'single JSON object: {"tests": [{"task": "<task from task_list>", '
+    "design doc's `interface` and `test_specs`, produce a single JSON "
+    'object: {"tests": [{"spec": "<entry from test_specs>", '
     '"code": "<python test function source, calling only functions listed '
-    'in `interface`>"}, ...]}. Write exactly one test per task, in '
-    "task_list order. Reply with the JSON object only, no surrounding prose."
+    'in `interface`>"}, ...]}. Write exactly one test per test_specs '
+    "entry, in test_specs order -- behavioral tests only, never tests of "
+    "file existence or implementation steps. Reply with the JSON object "
+    "only, no surrounding prose."
 )
 
 _CRITIC_SYSTEM_PROMPT = (
@@ -126,13 +130,11 @@ def _output_tail(result: TestRunResult, limit: int = 400) -> str:
     return combined if len(combined) <= limit else "..." + combined[-limit:]
 
 
-def parse_tester_response(text: str, task_list: list) -> TesterDoc | None:
+def parse_tester_response(text: str) -> TesterDoc | None:
     """Pure schema check, no LLM judgment: `None` on invalid JSON, a missing
-    or empty `tests` list, or any entry missing non-empty `code`. S32: the
-    old "exactly one test per task_list entry" count check was brittle
-    against real models (which split or merge tests); coverage is enforced
-    by `interface_coverage_gate`, not by count. `task_list` is kept in the
-    signature as the prompt's still-requested shape."""
+    or empty `tests` list, or any entry missing non-empty `code`. No count
+    check against the design (S32/S36): the parser enforces shape only;
+    coverage is `interface_coverage_gate`'s job."""
     try:
         data = json.loads(strip_code_fences(text))
     except (json.JSONDecodeError, TypeError):
@@ -295,14 +297,18 @@ class TesterStage:
         self._max_retries = max_retries
         self._test_command = test_command
 
-    def _tester_messages(self, design: DesignDoc) -> list[Message]:
-        # Scoped to the design's interface/task_list/test_specs only --
-        # never repo files or implementation code.
+    def _tester_messages(self, design: DesignDoc, feedback: str | None = None) -> list[Message]:
+        # Scoped to the design's interface/test_specs only -- never
+        # task_list (implementation steps: the coder's contract, S36),
+        # repo files, or implementation code. `feedback` is the critic's
+        # rejection reason from the previous attempt -- same retry-prompt
+        # slot pattern as the coder's failure summary.
         parts = [
             f"interface: {json.dumps(design.interface)}",
-            f"task_list: {json.dumps(design.task_list)}",
             f"test_specs: {json.dumps(design.test_specs)}",
         ]
+        if feedback is not None:
+            parts.append(f"Previous attempt was rejected by the test-critic: {feedback}")
         return [Message("system", _TESTER_SYSTEM_PROMPT), Message("user", "\n".join(parts))]
 
     def _critic_messages(self, design: DesignDoc, code: str) -> list[Message]:
@@ -316,9 +322,10 @@ class TesterStage:
     def run(self, issue_number: int, design: DesignDoc, *, cwd: str = ".") -> TesterResult:
         attempts = 0
         reasons: list[str] = []  # S31: one line per failed attempt
+        feedback: str | None = None  # S36: critic's rejection reason, fed to the retry
         for attempts in range(1, self._max_retries + 1):
-            completion = self._tester_llm.complete(self._tester_messages(design))
-            doc = parse_tester_response(completion.text, design.task_list)
+            completion = self._tester_llm.complete(self._tester_messages(design, feedback))
+            doc = parse_tester_response(completion.text)
             if doc is None:
                 reasons.append(
                     f"attempt {attempts}: tester response failed schema check "
@@ -345,7 +352,8 @@ class TesterStage:
                 continue
             if verdict.verdict == "reject":
                 reasons.append(f"attempt {attempts}: critic rejected tests: {verdict.reason}")
-                continue  # off-spec -- retry the tester
+                feedback = verdict.reason
+                continue  # off-spec -- retry the tester, now with the reason
 
             self._commit(issue_number, doc.code)
             # S22 split-brain fix: same ordering pin as `CoderStage` -- mirror
