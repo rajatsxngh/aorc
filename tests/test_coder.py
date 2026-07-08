@@ -328,3 +328,13 @@ def test_proceed_leaves_reason_empty():
 
     assert result.status == "proceed"
     assert result.reason == ""
+
+
+# ---- S32: real Claude wraps JSON in markdown code fences ------------------- #
+
+
+def test_parse_coder_response_accepts_a_fenced_response():
+    fenced = f"Here you go:\n```json\n{_ONE_TASK}\n```"
+    doc = parse_coder_response(fenced, _DESIGN.task_list, _DESIGN.files)
+    assert doc is not None
+    assert doc.tasks[0]["path"] == "src/aorc/add.py"

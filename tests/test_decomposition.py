@@ -183,3 +183,11 @@ def test_check_parent_complete_false_when_no_sub_issues_found():
     gh = MockGitHubClient(issues=[_epic(state="open")])
     assert check_parent_complete(42, gh) is False
     assert gh.issues[42].state == "open"
+
+
+# ---- S32: real Claude wraps JSON in markdown code fences ------------------- #
+
+
+def test_parse_decomposition_response_accepts_a_fenced_response():
+    plan = parse_decomposition_response(f"```json\n{_GOOD_PLAN}\n```")
+    assert plan is not None

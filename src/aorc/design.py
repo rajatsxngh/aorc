@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 from .graphify import GraphifyClient
 from .harness import CheckpointReport, InFlightRegistry
-from .interfaces import GitHubClient, LLMClient, Message
+from .interfaces import GitHubClient, LLMClient, Message, strip_code_fences
 from .pipeline import branch_name
 
 REQUIRED_FIELDS = ("interface", "test_specs", "task_list", "files", "confidence")
@@ -69,7 +69,7 @@ def parse_design_response(text: str) -> DesignDoc | None:
     """Pure schema check, no LLM judgment: `None` on any format miss (invalid
     JSON, not an object, or missing a required field)."""
     try:
-        data = json.loads(text)
+        data = json.loads(strip_code_fences(text))
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(data, dict) or any(f not in data for f in REQUIRED_FIELDS):

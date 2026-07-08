@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING
 from .coder import CoderStage
 from .design import DesignDoc
 from .guards import BLOCKED_LABEL
-from .interfaces import GitHubClient, LLMClient, Message, PullRequest
+from .interfaces import GitHubClient, LLMClient, Message, PullRequest, strip_code_fences
 from .pipeline import LABEL_COLUMN, branch_name
 from .tester import TestRunner
 
@@ -90,7 +90,7 @@ def parse_reviewer_response(text: str) -> ReviewVerdict | None:
     """Pure schema check: `None` unless `verdict` is exactly "approve" or
     "reject" -- same shape as S6's `parse_critic_response`."""
     try:
-        data = json.loads(text)
+        data = json.loads(strip_code_fences(text))
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(data, dict):

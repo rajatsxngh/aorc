@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 
 from .design import DesignDoc
 from .harness import container_name_for, issue_number_from_worktree_path, write_worktree_file
-from .interfaces import GitHubClient, LLMClient, Message
+from .interfaces import GitHubClient, LLMClient, Message, strip_code_fences
 from .pipeline import branch_name
 
 DEFAULT_MAX_RETRIES = 3
@@ -119,16 +119,19 @@ def _output_tail(result: TestRunResult, limit: int = 400) -> str:
 
 def parse_tester_response(text: str, task_list: list) -> TesterDoc | None:
     """Pure schema check, no LLM judgment: `None` on invalid JSON, a missing
-    `tests` list, a count that doesn't match `task_list` one-for-one, or any
-    entry missing non-empty `code`."""
+    or empty `tests` list, or any entry missing non-empty `code`. S32: the
+    old "exactly one test per task_list entry" count check was brittle
+    against real models (which split or merge tests); coverage is enforced
+    by `interface_coverage_gate`, not by count. `task_list` is kept in the
+    signature as the prompt's still-requested shape."""
     try:
-        data = json.loads(text)
+        data = json.loads(strip_code_fences(text))
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(data, dict) or "tests" not in data:
         return None
     tests = data["tests"]
-    if not isinstance(tests, list) or len(tests) != len(task_list):
+    if not isinstance(tests, list) or not tests:
         return None
     for entry in tests:
         if not isinstance(entry, dict) or not isinstance(entry.get("code"), str) or not entry["code"].strip():
@@ -141,7 +144,7 @@ def parse_critic_response(text: str) -> CriticVerdict | None:
     """Pure schema check: `None` unless `verdict` is exactly "approve" or
     "reject"."""
     try:
-        data = json.loads(text)
+        data = json.loads(strip_code_fences(text))
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(data, dict):
@@ -306,7 +309,7 @@ class TesterStage:
             if doc is None:
                 reasons.append(
                     f"attempt {attempts}: tester response failed schema check "
-                    f"(expected JSON with exactly {len(design.task_list)} tests); "
+                    "(expected JSON with a non-empty `tests` list); "
                     f"response head: {_snippet(completion.text)}"
                 )
                 continue  # format miss -- retry the tester

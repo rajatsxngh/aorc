@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass, field
 
 from .clarification import ClarificationStage
-from .interfaces import GitHubClient, Issue, LLMClient, Message
+from .interfaces import GitHubClient, Issue, LLMClient, Message, strip_code_fences
 
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 
@@ -78,7 +78,7 @@ def parse_decomposition_response(text: str) -> DecompositionPlan | None:
     """Pure schema check, no LLM judgment -- mirrors S5's
     `parse_design_response`: `None` on any format miss."""
     try:
-        data = json.loads(text)
+        data = json.loads(strip_code_fences(text))
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(data, dict):

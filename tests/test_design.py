@@ -209,3 +209,31 @@ def test_rebuild_in_flight_registry_is_a_fresh_registry_each_call():
 
     assert first.claimed_by_others(999) == {1: ["src/aorc/add.py"]}
     assert second.claimed_by_others(999) == {}
+
+
+# ---- S32: real Claude wraps JSON in markdown code fences ------------------- #
+
+
+def test_strip_code_fences_passes_raw_json_through_unchanged():
+    from aorc.interfaces import strip_code_fences
+
+    assert strip_code_fences(_VALID) == _VALID
+
+
+def test_strip_code_fences_unwraps_a_json_tagged_fence():
+    from aorc.interfaces import strip_code_fences
+
+    assert strip_code_fences(f"```json\n{_VALID}\n```") == _VALID
+
+
+def test_strip_code_fences_unwraps_a_bare_fence_with_surrounding_prose():
+    from aorc.interfaces import strip_code_fences
+
+    text = f"Here is the design you asked for:\n```\n{_VALID}\n```\nHope this helps!"
+    assert strip_code_fences(text) == _VALID
+
+
+def test_parse_design_response_accepts_a_fenced_response():
+    doc = parse_design_response(f"Sure!\n```json\n{_VALID}\n```")
+    assert doc is not None
+    assert doc.confidence == 0.9

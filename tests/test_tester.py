@@ -62,9 +62,21 @@ def test_parse_tester_response_valid():
     assert "assert add(1, 2) == 3" in doc.code
 
 
-def test_parse_tester_response_count_mismatch_is_format_miss():
-    two_tests = json.dumps({"tests": [{"task": "a", "code": "x"}, {"task": "b", "code": "y"}]})
-    assert parse_tester_response(two_tests, _DESIGN.task_list) is None
+def test_parse_tester_response_tolerates_a_count_mismatch():
+    """S32: 'exactly N tests' was brittle against real Claude (which often
+    splits or merges tests) -- coverage is enforced by the interface gate,
+    not by count."""
+    two_tests = json.dumps(
+        {"tests": [{"task": "a", "code": "def test_a():\n    assert add(1, 2) == 3\n"},
+                   {"task": "b", "code": "def test_b():\n    assert add(0, 0) == 0\n"}]}
+    )
+    doc = parse_tester_response(two_tests, _DESIGN.task_list)
+    assert doc is not None
+    assert "test_a" in doc.code and "test_b" in doc.code
+
+
+def test_parse_tester_response_empty_tests_list_is_format_miss():
+    assert parse_tester_response(json.dumps({"tests": []}), _DESIGN.task_list) is None
 
 
 def test_parse_tester_response_invalid_json_is_format_miss():
@@ -345,3 +357,31 @@ def test_proceed_leaves_reason_empty():
 
     assert result.status == "proceed"
     assert result.reason == ""
+
+
+# ---- S32: real Claude wraps JSON in markdown code fences ------------------- #
+
+
+def test_parse_tester_response_accepts_a_fenced_response():
+    fenced = f"Here are the tests:\n```json\n{_ONE_TEST}\n```"
+    doc = parse_tester_response(fenced, _DESIGN.task_list)
+    assert doc is not None
+    assert "assert add(1, 2) == 3" in doc.code
+
+
+def test_parse_critic_response_accepts_a_fenced_response():
+    verdict = parse_critic_response(f"```json\n{_APPROVE}\n```")
+    assert verdict is not None
+    assert verdict.verdict == "approve"
+
+
+def test_stage_proceeds_end_to_end_with_fenced_llm_responses():
+    fenced_test = f"Sure!\n```json\n{_ONE_TEST}\n```"
+    fenced_approve = f"```json\n{_APPROVE}\n```"
+    red = RunResult(returncode=1, stdout="AssertionError: assert 4 == 3")
+    stage, *_ = _stage([fenced_test], [fenced_approve], test_results=[red])
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "proceed"
+    assert result.attempts == 1

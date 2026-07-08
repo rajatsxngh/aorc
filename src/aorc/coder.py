@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 
 from .design import DesignDoc
 from .harness import write_worktree_file
-from .interfaces import GitHubClient, LLMClient, Message, ProviderError
+from .interfaces import GitHubClient, LLMClient, Message, ProviderError, strip_code_fences
 from .pipeline import branch_name
 from .tester import TestRunner, TestRunResult, generated_test_path
 
@@ -83,7 +83,7 @@ def parse_coder_response(text: str, task_list: list, allowed_files: list) -> Cod
     `files` -- the mechanical enforcement that keeps the coder from ever
     writing to the locked test file."""
     try:
-        data = json.loads(text)
+        data = json.loads(strip_code_fences(text))
     except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(data, dict) or "tasks" not in data:

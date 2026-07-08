@@ -7,6 +7,7 @@ a provider SDK or the GitHub SDK. Concrete adapters live behind these ABCs.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,6 +64,24 @@ class Completion:
     model: str
     finish_reason: str | None = None
     raw: Any = None  # underlying provider response, for debugging only
+
+
+# S32: real models routinely wrap a requested JSON object in a markdown code
+# fence (```json ... ```) with prose around it, despite "JSON only" prompts.
+# First fenced block, any language tag, content non-greedy to the next fence.
+_CODE_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*\s*\n?(.*?)```", re.DOTALL)
+
+
+def strip_code_fences(text: str) -> str:
+    """Normalize an LLM completion before JSON parsing: if the text contains
+    a markdown code fence, return the first fence's content (dropping the
+    optional language tag and any surrounding prose); otherwise return the
+    text unchanged. Non-string input passes through untouched so callers'
+    existing `TypeError` handling on `json.loads` still owns that case."""
+    if not isinstance(text, str):
+        return text
+    match = _CODE_FENCE_RE.search(text)
+    return match.group(1).strip() if match else text
 
 
 class LLMClient(ABC):

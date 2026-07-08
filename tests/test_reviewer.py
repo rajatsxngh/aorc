@@ -213,3 +213,12 @@ def test_no_coverage_command_skips_coverage_gate():
 
     assert result.status == "proceed"
     assert runner.calls == []
+
+
+# ---- S32: real Claude wraps JSON in markdown code fences ------------------- #
+
+
+def test_parse_reviewer_response_accepts_a_fenced_response():
+    verdict = parse_reviewer_response(f"```json\n{_APPROVE}\n```")
+    assert verdict is not None
+    assert verdict.verdict == "approve"
