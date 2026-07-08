@@ -378,9 +378,9 @@ def test_driver_resume_at_in_code_with_fresh_worktree_sees_earlier_committed_tes
     branch = branch_name(1)
     machine_a = _real_clone(remote, tmp_path / "machine-a")
     _real_git(["checkout", "-b", branch], cwd=machine_a)
-    test_dir = machine_a / "aorc" / "issue-1"
+    test_dir = machine_a / "tests"
     test_dir.mkdir(parents=True)
-    (test_dir / "test_generated.py").write_text("def test_from_earlier_attempt():\n    assert True\n")
+    (test_dir / "test_aorc_issue_1.py").write_text("def test_from_earlier_attempt():\n    assert True\n")
     _real_git(["add", "."], cwd=machine_a)
     _real_git(["commit", "-m", "tests"], cwd=machine_a)
     _real_git(["push", "origin", branch], cwd=machine_a)
@@ -404,7 +404,7 @@ def test_driver_resume_at_in_code_with_fresh_worktree_sees_earlier_committed_tes
 
     assert result.status == "proceed"
     cwd = worktrees.ensure(1)
-    assert (Path(cwd) / "aorc" / "issue-1" / "test_generated.py").exists()
+    assert (Path(cwd) / "tests" / "test_aorc_issue_1.py").exists()
 
 
 # ---- S31: blocking posts the stage + reason to the issue ------------------- #

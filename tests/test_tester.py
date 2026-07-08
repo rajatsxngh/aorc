@@ -428,6 +428,19 @@ def test_critic_rejection_reason_feeds_the_next_tester_attempt():
     assert "off-spec" in second_user
 
 
+# ---- S39: the generated test must live where pytest actually collects ------ #
+
+
+def test_generated_test_path_lives_under_the_projects_tests_dir():
+    """Live block: sandbox pyproject sets testpaths=["tests"], so a
+    generated test at aorc/issue-N/test_generated.py was never collected --
+    the red gate saw only the pre-existing (passing) suite and classified
+    'green'; the coder's green gate would likewise have passed without the
+    generated tests ever running. Unique filename per issue, inside the
+    conventional tests/ root."""
+    assert generated_test_path(7) == "tests/test_aorc_issue_7.py"
+
+
 # ---- S37: setup runs (once) before the attempt loop ------------------------ #
 
 

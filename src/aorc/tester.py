@@ -81,7 +81,13 @@ _CRITIC_SYSTEM_PROMPT = (
 
 
 def generated_test_path(issue_number: int) -> str:
-    return f"aorc/issue-{issue_number}/test_generated.py"
+    # S39: must sit inside the target project's conventional test root --
+    # pytest configs routinely restrict collection (testpaths=["tests"]),
+    # and a generated test that never gets collected silently turns the
+    # tester's red gate green and lets the coder's green gate pass without
+    # the generated tests running at all. Unique basename per issue so
+    # concurrent issues never collide on module names.
+    return f"tests/test_aorc_issue_{issue_number}.py"
 
 
 def marker_path(issue_number: int) -> str:
