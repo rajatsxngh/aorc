@@ -338,3 +338,24 @@ def test_parse_coder_response_accepts_a_fenced_response():
     doc = parse_coder_response(fenced, _DESIGN.task_list, _DESIGN.files)
     assert doc is not None
     assert doc.tasks[0]["path"] == "src/aorc/add.py"
+
+
+# ---- S33: a docker exec infra failure is never a test outcome -------------- #
+
+
+def test_coder_hard_fails_immediately_on_infra_failure():
+    """A dead exec target must not burn fix-loop attempts feeding daemon
+    errors to the coder as if they were failing tests."""
+    infra = RunResult(
+        returncode=1,
+        stderr="Error response from daemon: container aorc-issue-1 is not running",
+    )
+    stage, llm, gh, runner = _stage([_ONE_TASK] * 3, test_results=[infra] * 3)
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert result.attempts == 1
+    assert len(llm.calls) == 1
+    assert "is not running" in result.reason
+    assert "infra" in result.reason

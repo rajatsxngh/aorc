@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 
 import pytest
 
 from aorc.harness import DockerContainerRuntime
+from aorc.tester import ContainerTestRunner
 
 pytestmark = pytest.mark.integration
 
@@ -81,3 +83,32 @@ def test_start_and_teardown_real_container(tmp_path):
     assert handle.status == "stopped"
     gone = _inspect(handle.container_id, "{{.Id}}")
     assert gone.returncode != 0  # rm -f actually removed it
+
+
+def test_container_stays_alive_for_toolchain_exec(tmp_path):
+    """S33: the container must outlive the image's default CMD (a stock
+    image's CMD exits instantly under `docker run -d` with no TTY), so the
+    driver's later `docker exec` toolchain runs (`ContainerTestRunner`)
+    have a live target."""
+    if not _docker_available():
+        pytest.skip("no Docker daemon reachable")
+    issue = _ISSUE + 1
+    image = os.environ.get("AORC_IT_DOCKER_IMAGE") or "alpine:3.20"
+    subprocess.run(["docker", "rm", "-f", f"aorc-issue-{issue}"], capture_output=True)
+    # `ContainerTestRunner` resolves the container from this basename.
+    worktree = tmp_path / f"issue-{issue}"
+    worktree.mkdir()
+    runtime = DockerContainerRuntime(image)
+
+    handle = runtime.start(issue, f"aorc/issue-{issue}", str(worktree))
+    try:
+        # An instantly-exiting default CMD is long gone after a second.
+        time.sleep(1.0)
+        running = _inspect(handle.container_id, "{{.State.Running}}")
+        assert running.stdout.strip() == "true"
+
+        result = ContainerTestRunner().run(str(worktree), "echo hello-from-exec")
+        assert result.returncode == 0
+        assert "hello-from-exec" in result.stdout
+    finally:
+        runtime.teardown(handle)

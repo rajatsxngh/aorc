@@ -47,6 +47,15 @@ _ERROR_MARKERS = (
     "ERRORS",
 )
 
+# S33: markers of a `docker exec` that never reached the toolchain at all --
+# the daemon's dead/removed-target errors. Not a test outcome: before this,
+# "container ... is not running" carried none of the error markers, classified
+# "red", and made the tester falsely proceed on a dead container.
+_INFRA_MARKERS = (
+    "is not running",
+    "No such container",
+)
+
 _TESTER_SYSTEM_PROMPT = (
     "You are the tester agent for a software issue. You write failing "
     "tests -- you never see or write implementation code. Given the "
@@ -175,12 +184,16 @@ def interface_coverage_gate(interface: list, code: str) -> bool:
 def classify_test_run(result: TestRunResult) -> str:
     """Mechanical red/error/green classification, no LLM judgment:
     - returncode 0 -> "green" (unexpectedly already passing)
+    - a docker-exec dead-target marker present -> "infra-fail" (S33: the
+      toolchain never ran; stages hard-fail on it instead of retrying)
     - a collection/import/syntax crash marker present -> "error"
     - any other non-zero return (a clean assertion failure) -> "red"
     """
     if result.returncode == 0:
         return "green"
     text = result.stdout + result.stderr
+    if any(marker in text for marker in _INFRA_MARKERS):
+        return "infra-fail"
     if any(marker in text for marker in _ERROR_MARKERS):
         return "error"
     return "red"
@@ -342,6 +355,17 @@ class TesterStage:
             classification = classify_test_run(run_result)
             if classification == "red":
                 return TesterResult(status="proceed", code=doc.code, attempts=attempts)
+            if classification == "infra-fail":
+                # S33: the exec target is gone -- regenerating tests cannot
+                # fix that, so hard-fail now instead of burning retries.
+                reasons.append(
+                    f"attempt {attempts}: toolchain infrastructure failure "
+                    f"(docker exec target unavailable); returncode="
+                    f"{run_result.returncode}; output tail: {_output_tail(run_result)}"
+                )
+                return TesterResult(
+                    status="agent-blocked", code=None, attempts=attempts, reason="\n".join(reasons)
+                )
             # error/crash (or an unexpected green) -- back to tester/design
             reasons.append(
                 f"attempt {attempts}: test run classified {classification!r} (need 'red'); "

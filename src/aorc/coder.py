@@ -31,7 +31,7 @@ from .design import DesignDoc
 from .harness import write_worktree_file
 from .interfaces import GitHubClient, LLMClient, Message, ProviderError, strip_code_fences
 from .pipeline import branch_name
-from .tester import TestRunner, TestRunResult, generated_test_path
+from .tester import TestRunner, TestRunResult, classify_test_run, generated_test_path
 
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_MAX_PROVIDER_RETRIES = 3
@@ -211,6 +211,18 @@ class CoderStage:
             run_result = self._run_toolchain(cwd)
             if run_result.returncode == 0:
                 return CoderResult(status="proceed", attempts=attempts)
+            if classify_test_run(run_result) == "infra-fail":
+                # S33: the exec target is gone -- a daemon error is not a
+                # failing test, so hard-fail instead of feeding it to the
+                # coder as fix-loop feedback.
+                return CoderResult(
+                    status="agent-blocked",
+                    attempts=attempts,
+                    reason=(
+                        "toolchain infrastructure failure (docker exec target "
+                        f"unavailable); output tail:\n{_tail(failing_test_summary(run_result))}"
+                    ),
+                )
             failure = failing_test_summary(run_result)
 
         reason = f"fix loop exhausted after {attempts} attempts"

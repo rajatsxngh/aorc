@@ -385,3 +385,44 @@ def test_stage_proceeds_end_to_end_with_fenced_llm_responses():
 
     assert result.status == "proceed"
     assert result.attempts == 1
+
+
+# ---- S33: a docker exec infra failure is never a test outcome -------------- #
+
+_NOT_RUNNING = RunResult(
+    returncode=1,
+    stderr="Error response from daemon: container aorc-issue-1 is not running",
+)
+_NO_SUCH = RunResult(
+    returncode=1,
+    stderr="Error response from daemon: No such container: aorc-issue-1",
+)
+
+
+def test_classify_container_not_running_is_infra_fail_not_red():
+    assert classify_test_run(_NOT_RUNNING) == "infra-fail"
+
+
+def test_classify_no_such_container_is_infra_fail_not_red():
+    assert classify_test_run(_NO_SUCH) == "infra-fail"
+
+
+def test_classify_plain_assertion_failure_is_still_red():
+    assert classify_test_run(RunResult(returncode=1, stdout="AssertionError")) == "red"
+
+
+def test_stage_hard_fails_immediately_on_infra_failure():
+    """No LLM retries: a dead exec target cannot be fixed by regenerating
+    tests, and before S33 this exact output classified as 'red' and made
+    the tester falsely proceed."""
+    stage, tester_llm, *_ = _stage(
+        [_ONE_TEST] * 3, [_APPROVE] * 3, test_results=[_NOT_RUNNING] * 3
+    )
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert result.attempts == 1
+    assert len(tester_llm.calls) == 1
+    assert "is not running" in result.reason
+    assert "infra" in result.reason

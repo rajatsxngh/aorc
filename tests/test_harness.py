@@ -536,6 +536,24 @@ def test_docker_start_mounts_worktree_at_absolute_path(monkeypatch):
     assert source == os.path.abspath(".aorc-worktrees/issue-7")
 
 
+def test_docker_start_runs_a_long_lived_command(monkeypatch):
+    """S33: `docker run -d <image>` with no command leaves the container's
+    lifetime to the image's default CMD -- a stock image exits instantly,
+    and every later `docker exec` toolchain run then fails 'container is
+    not running'. The runtime must pin a long-lived command so the exec
+    target stays alive for the issue's whole build."""
+    from aorc.harness import DockerContainerRuntime
+
+    fake = _FakeDockerRun()
+    monkeypatch.setattr("aorc.harness.subprocess.run", fake)
+    runtime = DockerContainerRuntime("base:img")
+
+    runtime.start(7, "aorc/issue-7", "/tmp/wt", env=None)
+
+    image_at = fake.argv.index("base:img")
+    assert fake.argv[image_at + 1 :] == ["tail", "-f", "/dev/null"]
+
+
 def test_docker_start_without_env_passes_no_env_file(monkeypatch):
     from aorc.harness import DockerContainerRuntime
 

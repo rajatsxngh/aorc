@@ -185,6 +185,13 @@ class DockerContainerRuntime(ContainerRuntime):
                     "-v", f"{mount_source}:/workspace",
                     "-w", "/workspace",
                     self._base_image,
+                    # S33: without a pinned command the container's lifetime
+                    # is the image's default CMD -- a stock image exits
+                    # instantly and every later `docker exec` toolchain run
+                    # (ContainerTestRunner, S27) fails "container is not
+                    # running". `tail -f /dev/null` is busybox-compatible;
+                    # teardown's `docker rm -f` still ends it.
+                    "tail", "-f", "/dev/null",
                 ],
                 check=True,
                 capture_output=True,
