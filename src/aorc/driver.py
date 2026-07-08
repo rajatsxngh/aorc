@@ -3,11 +3,16 @@
 Sequences `DesignStage -> TesterStage -> CoderStage -> ReviewerStage` for one
 dispatched issue, threading a single shared worktree
 (`WorktreeManager.ensure`) as the `cwd` every stage's `TestRunner` executes
-in. The driver runs orchestrator-side (v1 decision, per
-`issues/22-pipeline-driver-worktree-sync.md`): the container remains the
-isolation boundary of record for a future in-agent execution path, but
-nothing about the actual design/test/code/review sequencing happens inside
-it today.
+in. The driver's own sequencing (which stage runs next, retries, labels)
+stays orchestrator-side (v1 decision, per
+`issues/22-pipeline-driver-worktree-sync.md`) -- that part of the "full
+in-agent execution path" is still out of scope. But each stage's `TestRunner`
+calls -- the actual `setup`/`test`/`lint`/coverage/smoke commands, the part
+that runs untrusted LLM-generated code -- do run inside the issue's own
+container as of S27 (`tester.ContainerTestRunner`, wired in by `__main__.py`'s
+`compose()` whenever `.aorc.yml` selects `container.runtime: docker`, the
+default); the container is no longer a cosmetic isolation boundary for that
+part.
 
 Label transitions move through the existing S2 `PipelineStateMachine`
 (`pipeline.advance`) at every stage boundary -- never a hand-rolled

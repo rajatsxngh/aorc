@@ -22,6 +22,7 @@ from aorc.install import ConfigGatedWakeLoop, InstallHandler
 from aorc.interfaces import Issue
 from aorc.llm.mock import MockLLMClient
 from aorc.merge import MergeTimeHandler, MockGitOps
+from aorc.tester import SubprocessTestRunner
 
 VALID_CONFIG = """
 llm:
@@ -214,6 +215,89 @@ def test_compose_attaches_a_pipeline_driver_when_setup_and_test_are_configured()
     )
     assert isinstance(collaborators.driver, PipelineDriver)
     assert collaborators.loop.driver is collaborators.driver
+
+
+def test_compose_wires_a_container_test_runner_by_default():
+    """S27: the live composition path (docker, the config default) must not
+    use `SubprocessTestRunner` for the build pipeline -- toolchain commands
+    run inside the issue's own container via `ContainerTestRunner`."""
+    from aorc.tester import ContainerTestRunner
+
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+    )
+    assert isinstance(collaborators.test_runner, ContainerTestRunner)
+
+
+def test_compose_keeps_subprocess_test_runner_for_actions_runtime():
+    """S25's `ActionsContainerRuntime` has no local container for `docker
+    exec` to target -- S27 stays out of scope for it (the driver still runs
+    orchestrator-side per S25's own scope note)."""
+    config = parse_config(
+        {
+            "llm": {"primary": {"provider": "claude", "model": "m"}},
+            "setup": "x",
+            "test": "y",
+            "container": {"runtime": "actions", "workflow_file": "aorc-build.yml"},
+        }
+    )
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+    )
+    assert type(collaborators.test_runner) is SubprocessTestRunner
+
+
+def test_compose_no_container_flag_falls_back_to_subprocess_test_runner():
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+        no_container=True,
+    )
+    assert type(collaborators.test_runner) is SubprocessTestRunner
+
+
+def test_compose_threads_worktrees_into_the_merge_handler():
+    """S27: `MergeTimeHandler`'s stale-PR recheck must run its toolchain
+    against the real per-issue worktree, not a single fixed `cwd` shared by
+    every issue -- otherwise `ContainerTestRunner` can't resolve a container
+    from it."""
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    worktrees = FakeWorktrees()
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=worktrees,
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+    )
+    assert collaborators.merge_handler._cwd_for(42) == worktrees.ensure(42)
 
 
 def test_compose_leaves_driver_none_without_setup_and_test_configured():

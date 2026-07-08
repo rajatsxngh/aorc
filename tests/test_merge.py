@@ -91,6 +91,7 @@ def make_handler(
     test_results=None,
     feedback_responses=(),
     graphify=None,
+    use_worktrees=False,
 ):
     gh = MockGitHubClient(issues=issues, pulls=pulls)
     runtime = MockContainerRuntime()
@@ -117,6 +118,7 @@ def make_handler(
         test_command="pytest -q",
         feedback_llm=feedback_llm,
         graphify=graphify,
+        worktrees=FakeWorktrees() if use_worktrees else None,
     )
     handler_deps = {
         "gh": gh,
@@ -373,6 +375,19 @@ def test_overlapping_pr_rebased_retested_rereviewed_stays_approved():
     assert len(deps["reviewer_llm"].calls) == 1
     assert gh.pulls[1002].state == "open"  # stays approved, waiting for the human
     assert gh.pulls[1003].state == "open"
+
+
+def test_stale_pr_recheck_uses_the_per_issue_worktree_when_wired(monkeypatch):
+    """S27: with a real `WorktreeManager` given, the stale-PR recheck must
+    run against issue 8's own worktree, not the single fixed `cwd="."`
+    every issue used to share -- that fixed path is what would make
+    `ContainerTestRunner` (docker exec into the wrong/no container, or
+    none at all) impossible to wire in correctly here."""
+    handler, deps = _stale_setup(reviewer_responses=[_APPROVE], use_worktrees=True)
+
+    handler.on_pr_merged(1001, "sha1")
+
+    assert deps["runner"].calls == [(f"/worktrees/issue-8", "pytest -q")]
 
 
 def test_stale_pr_rebase_conflict_blocks_agent_but_never_closes_pr():

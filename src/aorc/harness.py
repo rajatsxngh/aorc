@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import re
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
@@ -66,6 +67,27 @@ class CheckpointReport:
 
     issue_number: int
     files: list[str] = field(default_factory=list)
+
+
+def container_name_for(issue_number: int) -> str:
+    """The one naming convention both `DockerContainerRuntime.start` (which
+    names the container this way) and `tester.ContainerTestRunner` (S27,
+    which `docker exec`s into it) rely on -- no separate handle registry
+    needed to link a driver's toolchain run back to the container the
+    harness already started for the same issue."""
+    return f"aorc-issue-{issue_number}"
+
+
+_WORKTREE_ISSUE_RE = re.compile(r"issue-(\d+)$")
+
+
+def issue_number_from_worktree_path(path: str) -> int | None:
+    """Inverse of `WorktreeManager.path_for`: recovers the issue number from
+    a per-issue worktree path (the `cwd` every stage's `TestRunner` runs
+    against), so `ContainerTestRunner` can resolve the matching
+    `container_name_for` without threading a handle through the driver."""
+    match = _WORKTREE_ISSUE_RE.search(os.path.basename(path.rstrip("/")))
+    return int(match.group(1)) if match else None
 
 
 class ContainerRuntime(ABC):
@@ -137,7 +159,7 @@ class DockerContainerRuntime(ContainerRuntime):
         worktree_path: str,
         env: dict[str, str] | None = None,
     ) -> ContainerHandle:
-        name = f"aorc-issue-{issue_number}"
+        name = container_name_for(issue_number)
         # Secrets must never ride in argv: `docker run -e KEY=value` exposes
         # the value to every user on the host via `ps`. Deliver env through a
         # 0600 temp env-file instead, removed the moment `docker run` returns

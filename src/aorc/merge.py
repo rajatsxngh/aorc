@@ -54,7 +54,7 @@ from .coder import CoderStage, failing_test_summary
 from .design import DesignDoc, design_doc_path, parse_design_response
 from .graphify import GraphifyClient
 from .guards import BLOCKED_LABEL
-from .harness import _normalize_paths, cleanup_branch
+from .harness import WorktreeManager, _normalize_paths, cleanup_branch
 from .interfaces import Comment, GitHubClient, LLMClient, Message, PullRequest
 from .pipeline import DONE_COLUMN, LABEL_COLUMN, branch_name, current_pipeline_label
 from .reviewer import ReviewerStage
@@ -247,6 +247,7 @@ class MergeTimeHandler:
         graphify: GraphifyClient | None = None,
         bot_author: str = AGENT_AUTHOR,
         cwd: str = ".",
+        worktrees: WorktreeManager | None = None,
     ) -> None:
         self._loop = loop
         self._gitops = gitops
@@ -258,6 +259,12 @@ class MergeTimeHandler:
         self._graphify = graphify
         self._bot_author = bot_author
         self._cwd = cwd
+        # S27: when a real `WorktreeManager` is given (the live composition
+        # path), the stale-PR recheck runs its toolchain against the actual
+        # per-issue worktree `ContainerTestRunner` can resolve a container
+        # from -- not the single fixed `cwd` every issue used to share
+        # (silently wrong for anything but a same-directory host runner).
+        self._worktrees = worktrees
 
     @property
     def _github(self) -> GitHubClient:
@@ -373,7 +380,8 @@ class MergeTimeHandler:
         if design is None:
             self._block(issue_number, "open PR has no parseable design doc to re-review against")
             return "agent-blocked"
-        result = self._test_runner.run(self._cwd, self._test_command)
+        cwd = self._cwd_for(issue_number)
+        result = self._test_runner.run(cwd, self._test_command)
         if result.returncode != 0:
             if self._coder is None:
                 raise ValueError("stale-PR recheck requires a coder for the fix loop")
@@ -381,7 +389,7 @@ class MergeTimeHandler:
                 issue_number,
                 design,
                 repo_files=self._current_files(issue_number, design),
-                cwd=self._cwd,
+                cwd=cwd,
                 review_feedback=failing_test_summary(result),
             )
             if fix.status != "proceed":
@@ -391,7 +399,7 @@ class MergeTimeHandler:
             issue_number,
             design,
             self._github.get_issue(issue_number).body,
-            cwd=self._cwd,
+            cwd=cwd,
             pr=pr,
         )
         if review.status != "proceed":
@@ -413,7 +421,7 @@ class MergeTimeHandler:
             issue_number,
             design,
             repo_files=self._current_files(issue_number, design),
-            cwd=self._cwd,
+            cwd=self._cwd_for(issue_number),
             review_feedback=comment.body,
         )
         if result.status != "proceed":
@@ -447,6 +455,13 @@ class MergeTimeHandler:
             issue_number,
             f"{MERGE_TIME_MARKER}\nStopping: {reason}. Labeling `{BLOCKED_LABEL}`.",
         )
+
+    def _cwd_for(self, issue_number: int) -> str:
+        """The per-issue worktree when a real `WorktreeManager` is wired in
+        (S27's live composition path); the fixed `cwd` default otherwise --
+        every existing unit test's `MockTestRunner` ignores `cwd` entirely,
+        so this is a no-op change for the unit suite."""
+        return self._worktrees.ensure(issue_number) if self._worktrees is not None else self._cwd
 
     def _design_for(self, issue_number: int) -> DesignDoc | None:
         """The committed checkpoint claim, re-read from GitHub -- the same

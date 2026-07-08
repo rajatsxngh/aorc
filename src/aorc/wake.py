@@ -324,11 +324,19 @@ class WakeLoop:
         hand-built env dict exists anywhere in the loop.
 
         S22: if a `driver` is configured, it runs the actual
-        design/test/code/review sequence right here, orchestrator-side --
-        the container the harness just started runs no command of its own
-        (known limitation, `issues/README.md`). `driver` is `None` for every
-        loop that doesn't set it, which reproduces the exact pre-S22
-        behavior (mint + start, nothing else)."""
+        design/test/code/review *sequencing* right here, orchestrator-side.
+        S27 closed the gap that used to leave the container the harness just
+        started running no command of its own: each stage's `setup`/`test`/
+        `lint`/coverage/smoke commands now execute inside that same
+        container via `tester.ContainerTestRunner` (`docker exec`, resolved
+        from the issue's worktree path -- see `harness.container_name_for`),
+        composed in whenever `.aorc.yml` selects `container.runtime: docker`
+        (the default); only the sequencing decisions themselves (which
+        stage runs next, retries, labels) stay orchestrator-side, and the
+        `actions` runtime still falls back to a host `SubprocessTestRunner`
+        (see `issues/README.md`). `driver` is `None` for every loop that
+        doesn't set it, which reproduces the exact pre-S22 behavior (mint +
+        start, nothing else)."""
         token = self._broker.mint(issue_number, self._repo)
         env = self._broker.container_env(token)
         handle = self.harness.dispatch(issue_number, env)

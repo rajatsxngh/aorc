@@ -43,7 +43,7 @@ from .interfaces import GitHubClient, LLMClient
 from .llm import build_llm_client
 from .merge import MergeTimeHandler
 from .reviewer import ReviewerStage
-from .tester import SubprocessTestRunner, TesterStage
+from .tester import ContainerTestRunner, SubprocessTestRunner, TestRunner, TesterStage
 
 DEFAULT_CONFIG_PATH = ".aorc.yml"
 DEFAULT_WORKTREES_DIR = ".aorc-worktrees"
@@ -101,6 +101,11 @@ class Collaborators:
     installer: InstallHandler
     driver: PipelineDriver | None = None
     merge_handler: MergeTimeHandler | None = None
+    # S27: the `TestRunner` wired into the build pipeline's stages (`None`
+    # under the same setup/test gate `driver` is `None` under) -- surfaced
+    # here so callers/tests can confirm which one composition chose without
+    # reaching into a stage's private attribute.
+    test_runner: TestRunner | None = None
 
     @property
     def github(self) -> GitHubClient:
@@ -122,6 +127,7 @@ def compose(
     worktrees_dir: str = DEFAULT_WORKTREES_DIR,
     base_image: str | None = None,
     dev_pat_minter: bool = False,
+    no_container: bool = False,
 ) -> Collaborators:
     """Build the real collaborators and hand back the composed
     `ConfigGatedWakeLoop` + `InstallHandler`. Every parameter is overridable
@@ -226,7 +232,19 @@ def compose(
             if config.escalation is not None
             else llm
         )
-        test_runner = SubprocessTestRunner()
+        # S27: the toolchain (setup/test/lint/coverage/smoke) runs inside the
+        # issue's own Docker container via `ContainerTestRunner` -- the real
+        # isolation boundary the harness's container was always meant to be
+        # -- unless the config selects `container.runtime: actions` (that
+        # runtime has no local container for `docker exec` to target; S25's
+        # driver-stays-orchestrator-side scope applies there unchanged) or
+        # the caller passes `--no-container`, the explicit dev escape hatch
+        # back to the host subprocess.
+        test_runner = (
+            SubprocessTestRunner()
+            if no_container or config.container_runtime == "actions"
+            else ContainerTestRunner()
+        )
         coder_stage = CoderStage(
             llm,
             loop.github,
@@ -272,9 +290,15 @@ def compose(
             test_runner=test_runner,
             test_command=config.test if test_runner is not None else None,
             feedback_llm=llm,
+            worktrees=worktrees,
         )
     return Collaborators(
-        llm=llm, loop=loop, installer=installer, driver=driver, merge_handler=merge_handler
+        llm=llm,
+        loop=loop,
+        installer=installer,
+        driver=driver,
+        merge_handler=merge_handler,
+        test_runner=test_runner,
     )
 
 
@@ -298,6 +322,16 @@ def build_argparser() -> argparse.ArgumentParser:
             "dev escape hatch: mint every per-issue container token as the fixed "
             f"${GITHUB_TOKEN_ENV} PAT instead of the real GitHub App exchange "
             f"(no ${APP_ID_ENV}/${APP_PRIVATE_KEY_PATH_ENV} needed). Never use live."
+        ),
+    )
+    parser.add_argument(
+        "--no-container",
+        action="store_true",
+        help=(
+            "dev escape hatch: run the setup/test/lint toolchain on the host via "
+            "SubprocessTestRunner instead of `docker exec`-ing into the issue's "
+            "container. Never use live -- untrusted, LLM-generated commands then "
+            "run with the orchestrator's own user/filesystem/network."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -329,7 +363,9 @@ def run(argv: list[str] | None = None, *, collaborators: Collaborators | None = 
         try:
             config = load_config(args.config)
             repo = args.repo or _require_env(REPO_ENV)
-            collaborators = compose(config, repo, dev_pat_minter=args.dev_pat_minter)
+            collaborators = compose(
+                config, repo, dev_pat_minter=args.dev_pat_minter, no_container=args.no_container
+            )
         except (ConfigError, StartupError) as exc:
             print(f"aorc: {exc}", file=sys.stderr)
             return 1

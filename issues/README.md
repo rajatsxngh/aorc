@@ -82,6 +82,18 @@ A container holding its per-issue `GITHUB_TOKEN` can push or call the API
 directly, bypassing the orchestrator-side `ScrubbingGitHubClient` (layer-2
 scrubbing covers orchestrator-mediated writes only). Carried S15 → S16 → S18
 → S19; S19 closed the `docker run -e` host-`ps` exposure half (env now via a
-0600 temp `--env-file`) but push mediation (orchestrator-side push /
-scrubbing egress proxy) requires the real in-container agent execution path,
-which v1 never builds. First work item for any v2.
+0600 temp `--env-file`). S27 closed a related but distinct gap -- the
+container's isolation boundary used to be cosmetic even for the *toolchain*
+(`setup`/`test`/`lint`/coverage/smoke ran on the host via
+`SubprocessTestRunner` regardless of a container being started); those now
+run inside the issue's own container via `tester.ContainerTestRunner`
+(`docker exec`) whenever `.aorc.yml` selects `container.runtime: docker`
+(the default).
+
+Push mediation itself is still open, though: S27 was explicitly scoped to
+the toolchain only (per `issues/done/27-container-runs-real-build.md`'s
+"out of scope" note) -- the LLM agent loop that would actually call
+`git push`/the GitHub API still runs orchestrator-side, not inside the
+container. Orchestrator-side push mediation / a scrubbing egress proxy
+still requires moving that agent loop in-container, which v1 (and S27)
+never builds. First work item for any v2.

@@ -18,6 +18,8 @@ from aorc.harness import (
     MockContainerRuntime,
     WorktreeManager,
     cleanup_branch,
+    container_name_for,
+    issue_number_from_worktree_path,
 )
 from aorc.interfaces import Issue, PullRequest
 from aorc.pipeline import branch_name
@@ -610,3 +612,41 @@ def test_ensure_without_a_remote_is_unaffected(tmp_path):
     path = worktrees.ensure(55)
 
     assert (Path(path) / "README.md").exists()
+
+
+# --------------------------------------------------------------------------- #
+# S27 -- the container_name_for / issue_number_from_worktree_path naming
+# convention `ContainerTestRunner` relies on to find the right container
+# without a separate handle registry.
+# --------------------------------------------------------------------------- #
+
+
+def test_container_name_for_matches_docker_start_naming(monkeypatch):
+    """`DockerContainerRuntime.start` must name the container exactly what
+    `container_name_for` predicts -- that shared convention is the whole
+    link `ContainerTestRunner` depends on."""
+    from aorc.harness import DockerContainerRuntime
+
+    fake = _FakeDockerRun()
+    monkeypatch.setattr("aorc.harness.subprocess.run", fake)
+    runtime = DockerContainerRuntime("base:img")
+
+    handle = runtime.start(42, "aorc/issue-42", "/tmp/wt")
+
+    assert handle.container_id == container_name_for(42)
+
+
+def test_issue_number_from_worktree_path_matches_path_for():
+    worktrees = WorktreeManager("/repo", "/worktrees")
+    path = worktrees.path_for(17)
+
+    assert issue_number_from_worktree_path(path) == 17
+
+
+def test_issue_number_from_worktree_path_strips_trailing_slash():
+    assert issue_number_from_worktree_path("/worktrees/issue-9/") == 9
+
+
+def test_issue_number_from_worktree_path_none_for_unrelated_path():
+    assert issue_number_from_worktree_path(".") is None
+    assert issue_number_from_worktree_path("/tmp/not-a-worktree") is None

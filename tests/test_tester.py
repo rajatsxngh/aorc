@@ -10,7 +10,9 @@ from aorc.github.mock import MockGitHubClient
 from aorc.interfaces import Issue
 from aorc.llm.mock import MockLLMClient
 from aorc.pipeline import branch_name
+from aorc.harness import WorktreeManager
 from aorc.tester import (
+    ContainerTestRunner,
     MockTestRunner,
     TesterStage as Stage,
     TestRunResult as RunResult,
@@ -233,3 +235,54 @@ def test_committed_test_file_is_visible_to_the_toolchain_before_it_runs(tmp_path
 
     assert result.status == "proceed"
     assert runner.seen_content == ["def test_add():\n    assert add(1, 2) == 3\n"]
+
+
+# ---- S27: ContainerTestRunner -- docker exec into the issue's container --- #
+
+
+class _FakeDockerExec:
+    def __init__(self, returncode=0, stdout="", stderr="") -> None:
+        self.argv: list[str] | None = None
+        self._returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    def __call__(self, argv, **kwargs):
+        import subprocess as _subprocess
+
+        self.argv = list(argv)
+        return _subprocess.CompletedProcess(argv, self._returncode, self._stdout, self._stderr)
+
+
+def test_container_test_runner_execs_into_the_issue_container(monkeypatch):
+    fake = _FakeDockerExec(returncode=1, stdout="out", stderr="err")
+    monkeypatch.setattr("aorc.tester.subprocess.run", fake)
+    worktrees = WorktreeManager("/repo", "/worktrees")
+    runner = ContainerTestRunner()
+
+    result = runner.run(worktrees.path_for(42), "pytest -q")
+
+    assert fake.argv == ["docker", "exec", "-w", "/workspace", "aorc-issue-42", "sh", "-c", "pytest -q"]
+    assert result == RunResult(returncode=1, stdout="out", stderr="err")
+
+
+def test_container_test_runner_uses_a_custom_workdir(monkeypatch):
+    fake = _FakeDockerExec()
+    monkeypatch.setattr("aorc.tester.subprocess.run", fake)
+    worktrees = WorktreeManager("/repo", "/worktrees")
+    runner = ContainerTestRunner(workdir="/other")
+
+    runner.run(worktrees.path_for(9), "true")
+
+    assert fake.argv[:4] == ["docker", "exec", "-w", "/other"]
+
+
+def test_container_test_runner_rejects_a_cwd_it_cannot_resolve(monkeypatch):
+    monkeypatch.setattr("aorc.tester.subprocess.run", _FakeDockerExec())
+    runner = ContainerTestRunner()
+
+    try:
+        runner.run(".", "pytest -q")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "." in str(exc)

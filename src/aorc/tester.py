@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from .design import DesignDoc
-from .harness import write_worktree_file
+from .harness import container_name_for, issue_number_from_worktree_path, write_worktree_file
 from .interfaces import GitHubClient, LLMClient, Message
 from .pipeline import branch_name
 
@@ -191,10 +191,50 @@ class MockTestRunner(TestRunner):
 class SubprocessTestRunner(TestRunner):
     """Real test execution via the project's own toolchain -- not a provider
     SDK, so this doesn't cross architecture invariant #1 (same reasoning as
-    `WorktreeManager`'s git shell-out, S4)."""
+    `WorktreeManager`'s git shell-out, S4). Runs on the host; superseded in
+    the live `docker` composition path by `ContainerTestRunner` (S27), but
+    still used for the unit suite and the `--no-container` dev escape
+    hatch."""
 
     def run(self, cwd: str, command: str) -> TestRunResult:
         proc = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True)
+        return TestRunResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+
+
+class ContainerTestRunner(TestRunner):
+    """S27 -- real test execution via `docker exec` into the issue's own
+    running container, against its mounted `/workspace`, instead of
+    `SubprocessTestRunner`'s host subprocess. This is what makes the
+    container the harness already starts (`DockerContainerRuntime.start`)
+    the actual isolation boundary for untrusted, LLM-generated setup/test/
+    lint commands, rather than a cosmetic one.
+
+    The container to exec into is resolved from `cwd` alone -- the per-issue
+    worktree path every stage already passes (`WorktreeManager.ensure` /
+    `.path_for`) -- via `issue_number_from_worktree_path` and
+    `container_name_for`, the same naming convention
+    `DockerContainerRuntime.start` used to name the container in the first
+    place. No separate issue -> container-id registry has to be threaded
+    through the driver or stages to keep this correct: both names are pure
+    functions of the same issue number.
+    """
+
+    def __init__(self, workdir: str = "/workspace") -> None:
+        self._workdir = workdir
+
+    def run(self, cwd: str, command: str) -> TestRunResult:
+        issue_number = issue_number_from_worktree_path(cwd)
+        if issue_number is None:
+            raise ValueError(
+                f"ContainerTestRunner cannot resolve an issue container from cwd {cwd!r} "
+                "-- expected a per-issue worktree path (WorktreeManager.path_for)"
+            )
+        name = container_name_for(issue_number)
+        proc = subprocess.run(
+            ["docker", "exec", "-w", self._workdir, name, "sh", "-c", command],
+            capture_output=True,
+            text=True,
+        )
         return TestRunResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
 
 
