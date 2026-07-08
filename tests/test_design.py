@@ -40,6 +40,8 @@ _LOW_CONFIDENCE = json.dumps(
 def _stage(responses, **kwargs):
     llm = MockLLMClient(responses=responses)
     gh = MockGitHubClient(issues=[Issue(number=1)])
+    # S29: branch creation is the driver's job, before any stage runs.
+    gh.create_branch(branch_name(1))
     return DesignStage(llm, gh, **kwargs), llm, gh
 
 
@@ -174,7 +176,7 @@ def test_checkpoint_report_carries_files_from_design_doc():
 
 def test_rebuild_in_flight_registry_reads_committed_design_docs():
     gh = MockGitHubClient(issues=[Issue(number=1), Issue(number=2)])
-    gh.commit_file(branch_name(1), design_doc_path(1), _VALID, message="design: #1")
+    gh.add_file(branch_name(1), design_doc_path(1), _VALID)
 
     registry = rebuild_in_flight_registry([1, 2], gh)
 
@@ -191,7 +193,7 @@ def test_rebuild_in_flight_registry_skips_issues_with_no_design_doc_yet():
 
 def test_rebuild_in_flight_registry_skips_unparseable_design_doc():
     gh = MockGitHubClient(issues=[Issue(number=1)])
-    gh.commit_file(branch_name(1), design_doc_path(1), "not json", message="design: #1")
+    gh.add_file(branch_name(1), design_doc_path(1), "not json")
 
     registry = rebuild_in_flight_registry([1], gh)
 
@@ -200,7 +202,7 @@ def test_rebuild_in_flight_registry_skips_unparseable_design_doc():
 
 def test_rebuild_in_flight_registry_is_a_fresh_registry_each_call():
     gh = MockGitHubClient(issues=[Issue(number=1)])
-    gh.commit_file(branch_name(1), design_doc_path(1), _VALID, message="design: #1")
+    gh.add_file(branch_name(1), design_doc_path(1), _VALID)
 
     first = rebuild_in_flight_registry([1], gh)
     second = rebuild_in_flight_registry([], gh)

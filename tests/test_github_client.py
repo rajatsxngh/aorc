@@ -2,7 +2,9 @@
 so every downstream slice is unit-testable without a real repo.
 """
 
-from aorc.github.mock import MockGitHubClient
+import pytest
+
+from aorc.github.mock import MockGitHubClient, UnknownBranchError
 from aorc.interfaces import Comment, GitHubClient, Issue, PullRequest
 
 
@@ -95,10 +97,115 @@ def test_commit_file_then_readable_via_get_file():
     gh = MockGitHubClient(issues=[Issue(number=1)])
     assert gh.get_file("aorc/issue-1/design.md", "aorc/issue-1") is None
 
+    gh.create_branch("aorc/issue-1")
     gh.commit_file("aorc/issue-1", "aorc/issue-1/design.md", "content", message="design: #1")
 
     assert gh.get_file("aorc/issue-1/design.md", "aorc/issue-1") == "content"
     assert ("commit_file", "aorc/issue-1", "aorc/issue-1/design.md", "design: #1") in gh.calls
+
+
+# ---- S29: commit to a branch nobody created must fail like real GitHub ----- #
+# Live run-issue finding: the contents API 404s on the first commit to a fresh
+# `aorc/issue-<n>` because nothing created the branch. The mock recorded such
+# commits regardless of branch existence, hiding the whole bug class.
+
+
+def test_commit_file_to_nonexistent_branch_raises_like_real_github():
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    with pytest.raises(UnknownBranchError):
+        gh.commit_file("aorc/issue-1", "aorc/issue-1/design.md", "content", message="design: #1")
+
+
+def test_commit_file_to_default_branch_needs_no_create():
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    gh.commit_file("main", "README.md", "hi", message="docs")
+    assert gh.get_file("README.md", "main") == "hi"
+
+
+def test_create_branch_records_resolved_base_and_is_idempotent():
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    gh.create_branch("aorc/issue-1")
+    gh.create_branch("aorc/issue-1")  # re-dispatch: no-op, never raises
+    assert ("create_branch", "aorc/issue-1", "main") in gh.calls
+
+
+def test_create_branch_from_unknown_base_raises():
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    with pytest.raises(UnknownBranchError):
+        gh.create_branch("aorc/issue-1", from_ref="no-such-base")
+
+
+def test_add_file_helper_registers_its_ref_as_existing_branch():
+    # Simulating an already-committed artifact on a branch implies the branch
+    # exists -- resume-style tests keep working without extra setup.
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    gh.add_file("aorc/issue-1", "aorc/issue-1/design.md", "doc")
+    gh.commit_file("aorc/issue-1", "aorc/issue-1/tests.md", "t", message="tests")
+    assert gh.get_file("aorc/issue-1/tests.md", "aorc/issue-1") == "t"
+
+
+def test_delete_branch_unregisters_it():
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    gh.create_branch("aorc/issue-1")
+    gh.delete_branch("aorc/issue-1")
+    with pytest.raises(UnknownBranchError):
+        gh.commit_file("aorc/issue-1", "f.md", "c", message="m")
+
+
+# ---- S29: SdkGitHubClient.create_branch against a fake git-refs API -------- #
+
+
+def _sdk_client_with_fake_repo(fake_repo):
+    from aorc.github.sdk_adapter import SdkGitHubClient
+
+    client = SdkGitHubClient(token="t", repo="owner/repo")
+    client._repo = fake_repo
+    return client
+
+
+class _FakeGitRef:
+    def __init__(self, sha):
+        self.object = type("O", (), {"sha": sha})()
+
+
+class _FakeRefsRepo:
+    default_branch = "main"
+
+    def __init__(self):
+        self.refs = {"heads/main": _FakeGitRef("abc123")}
+        self.created = []
+
+    def get_git_ref(self, ref):
+        from github import GithubException
+
+        if ref in self.refs:
+            return self.refs[ref]
+        raise GithubException(404, {"message": "Not Found"}, {})
+
+    def create_git_ref(self, ref, sha):
+        self.created.append((ref, sha))
+        self.refs[ref.removeprefix("refs/")] = _FakeGitRef(sha)
+
+
+def test_sdk_create_branch_creates_ref_from_default_branch_head():
+    pytest.importorskip("github")
+    fake = _FakeRefsRepo()
+    client = _sdk_client_with_fake_repo(fake)
+
+    client.create_branch("aorc/issue-9")
+
+    assert fake.created == [("refs/heads/aorc/issue-9", "abc123")]
+
+
+def test_sdk_create_branch_noops_when_ref_already_exists():
+    pytest.importorskip("github")
+    fake = _FakeRefsRepo()
+    fake.refs["heads/aorc/issue-9"] = _FakeGitRef("def456")
+    client = _sdk_client_with_fake_repo(fake)
+
+    client.create_branch("aorc/issue-9")
+
+    assert fake.created == []
 
 
 # ---- S28: forbidden board creation degrades to label-only ------------------ #

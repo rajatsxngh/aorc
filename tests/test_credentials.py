@@ -333,6 +333,7 @@ def test_committed_file_content_and_message_are_scrubbed():
     inner = MockGitHubClient()
     gh = ScrubbingGitHubClient(inner)
 
+    gh.create_branch("aorc/issue-5")
     gh.commit_file("aorc/issue-5", "notes.md", LEAKY, f"msg {LEAKY}")
 
     assert "sk-ant-" not in inner.files[("aorc/issue-5", "notes.md")]
@@ -379,6 +380,9 @@ def test_branch_names_are_scrubbed_on_pr_head_and_commit():
     pr = gh.open_pull_request("t", "b", head=leaky_branch)
     assert "ghp_" not in pr.head
 
+    # create + commit scrub the branch name identically, so they line up
+    gh.create_branch(leaky_branch)
+    assert all("ghp_" not in b for b in inner.branches)
     gh.commit_file(leaky_branch, "notes.md", "content", "msg")
     assert all("ghp_" not in ref for (ref, _path) in inner.files)
 

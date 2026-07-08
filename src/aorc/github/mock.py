@@ -15,6 +15,12 @@ from ..interfaces import Comment, GitHubClient, Issue, PullRequest
 _CONFIGURED = object()
 
 
+class UnknownBranchError(Exception):
+    """A commit targeted a branch that doesn't exist -- mirrors real GitHub's
+    404 (`UnknownObjectException`). The mock used to record such commits
+    anyway, which hid the S29 live failure from the whole unit suite."""
+
+
 class MockGitHubClient(GitHubClient):
     def __init__(
         self,
@@ -32,6 +38,8 @@ class MockGitHubClient(GitHubClient):
         self.board: dict[int, str] = {}
         self.board_columns: list[str] | None = None
         self.created_labels: dict[str, dict] = {}
+        self.default_branch = "main"
+        self.branches: set[str] = {self.default_branch}
         self.files: dict[tuple[str, str], str] = {}  # (ref, path) -> content
         self.calls: list[tuple] = []
         self._next_comment_id = 1
@@ -115,19 +123,31 @@ class MockGitHubClient(GitHubClient):
         pr.merged = True
         pr.state = "closed"
 
+    def create_branch(self, branch: str, from_ref: str | None = None) -> None:
+        base = from_ref if from_ref is not None else self.default_branch
+        if base not in self.branches:
+            raise UnknownBranchError(base)
+        self.calls.append(("create_branch", branch, base))
+        self.branches.add(branch)
+
     def delete_branch(self, branch: str) -> None:
         self.calls.append(("delete_branch", branch))
+        self.branches.discard(branch)
 
     # ---- repo contents ----------------------------------------------------- #
     def get_file(self, path: str, ref: str) -> str | None:
         return self.files.get((ref, path))
 
     def commit_file(self, branch: str, path: str, content: str, message: str) -> None:
+        if branch not in self.branches:
+            raise UnknownBranchError(branch)
         self.calls.append(("commit_file", branch, path, message))
         self.files[(branch, path)] = content
 
     def add_file(self, ref: str, path: str, content: str) -> None:
-        """Test helper: simulate a file committed to `ref` at `path`."""
+        """Test helper: simulate a file committed to `ref` at `path` (which
+        implies `ref` exists, so it's registered as a known branch)."""
+        self.branches.add(ref)
         self.files[(ref, path)] = content
 
     # ---- projects board -------------------------------------------------- #

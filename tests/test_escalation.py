@@ -396,6 +396,7 @@ def test_rate_limited_client_delegates_all_seam_methods():
     assert client.list_pull_requests() != []
     client.merge_pull_request(pr.number)
     client.delete_branch("head")
+    client.create_branch("br")
     client.commit_file("br", "f.py", "content", "msg")
     assert client.get_file("f.py", "br") == "content"
     client.set_board_column(1, "In Progress")

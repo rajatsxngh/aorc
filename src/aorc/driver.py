@@ -104,6 +104,10 @@ class PipelineDriver:
             return DriverResult(status=label, stage=label)
 
         cwd = self._worktrees.ensure(issue_number)
+        # S29: `ensure` creates the branch only in the local clone; the API
+        # commits every stage makes land on the remote, where the contents
+        # API never auto-creates a branch (first commit_file would 404).
+        self._github.create_branch(branch_name(issue_number))
         design_doc: DesignDoc | None = None
 
         if label is None:

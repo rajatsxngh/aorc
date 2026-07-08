@@ -182,6 +182,14 @@ class GitHubClient(ABC):
     def merge_pull_request(self, number: int, method: str = "merge") -> None: ...
 
     @abstractmethod
+    def create_branch(self, branch: str, from_ref: str | None = None) -> None:
+        """Create `branch` pointing at `from_ref`'s current HEAD (the
+        repository default branch when None); no-op when it already exists,
+        so re-dispatch stays idempotent. The contents API never auto-creates
+        a branch (a `commit_file` to a nonexistent one is a 404), so this
+        must run before the first `commit_file` to a fresh branch (S29)."""
+
+    @abstractmethod
     def delete_branch(self, branch: str) -> None:
         """Delete a branch on the remote. Used by the three fixed
         branch-cleanup cases (S4): merged -> delete, everything else keeps

@@ -345,6 +345,9 @@ class RateLimitedGitHubClient(GitHubClient):
     def merge_pull_request(self, number: int, method: str = "merge") -> None:
         return self._call(lambda: self._inner.merge_pull_request(number, method))
 
+    def create_branch(self, branch: str, from_ref: str | None = None) -> None:
+        return self._call(lambda: self._inner.create_branch(branch, from_ref))
+
     def delete_branch(self, branch: str) -> None:
         return self._call(lambda: self._inner.delete_branch(branch))
 

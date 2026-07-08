@@ -257,6 +257,7 @@ def test_real_worktree_and_subprocess_toolchain_see_coders_committed_code(tmp_pa
         confidence=0.9,
     )
     gh = MockGitHubClient(issues=[Issue(number=1)])
+    gh.create_branch(branch_name(1))  # S29: the driver's job, done in setup here
     coder_llm = MockLLMClient(
         responses=[
             json.dumps(
@@ -316,6 +317,50 @@ def _real_clone(remote, dest):
     _real_git(["config", "user.email", "a@a.com"], cwd=dest)
     _real_git(["config", "user.name", "a"], cwd=dest)
     return dest
+
+
+# ---- S29 -- create the issue branch before the first commit_file ----------- #
+
+
+def test_fresh_dispatch_creates_issue_branch_before_first_commit(tmp_path):
+    """Live run-issue finding: real GitHub 404s the design doc commit because
+    nothing ever creates `aorc/issue-<n>` on the remote. The driver must
+    create it (off the default branch) before any stage's `commit_file`."""
+    driver, gh, llms, runner = _build_driver(tmp_path)
+
+    result = driver.run(1)
+
+    assert result.status == "proceed"
+    assert ("create_branch", branch_name(1), "main") in gh.calls
+    call_kinds = [c[0] for c in gh.calls]
+    assert call_kinds.index("create_branch") < call_kinds.index("commit_file")
+    assert gh.get_file(design_doc_path(1), branch_name(1)) is not None
+
+
+def test_fresh_dispatch_with_real_remote_commits_design_doc_to_created_branch(tmp_path):
+    """S29 acceptance, S26-style harness: a real throwaway bare remote backs
+    the worktree, the hardened mock stands in for the contents API. A fresh
+    issue's very first dispatch must succeed end-to-end -- before the fix,
+    the design doc commit dies on the nonexistent branch exactly like the
+    live 404."""
+    remote = _init_bare_remote(tmp_path)
+    local_clone = _real_clone(remote, tmp_path / "local")
+
+    gh = MockGitHubClient(issues=[Issue(number=1, body="add two numbers")])
+    runner = MockTestRunner(results=list(_DEFAULT_TEST_RESULTS))
+    design = DesignStage(MockLLMClient(responses=[_DESIGN_JSON]), gh)
+    tester = TestStage(
+        MockLLMClient(responses=[_ONE_TEST]), MockLLMClient(responses=[_CRITIC_APPROVE]), gh, runner
+    )
+    coder = CoderStage(MockLLMClient(responses=[_ONE_TASK]), gh, runner)
+    reviewer = ReviewerStage(MockLLMClient(responses=[_REVIEW_APPROVE]), coder, gh, runner)
+    worktrees = WorktreeManager(str(local_clone), str(tmp_path / "worktrees"))
+    driver = PipelineDriver(gh, worktrees, design, tester, coder, reviewer)
+
+    result = driver.run(1)
+
+    assert result.status == "proceed"
+    assert gh.get_file(design_doc_path(1), branch_name(1)) is not None
 
 
 def test_driver_resume_at_in_code_with_fresh_worktree_sees_earlier_committed_test(tmp_path):

@@ -46,6 +46,8 @@ def _stage(tester_responses, critic_responses, test_results=None, **kwargs):
     tester_llm = MockLLMClient(responses=tester_responses)
     critic_llm = MockLLMClient(responses=critic_responses)
     gh = MockGitHubClient(issues=[Issue(number=1)])
+    # S29: branch creation is the driver's job, before any stage runs.
+    gh.create_branch(branch_name(1))
     runner = MockTestRunner(results=test_results)
     stage = Stage(tester_llm, critic_llm, gh, runner, **kwargs)
     return stage, tester_llm, critic_llm, gh, runner
@@ -229,7 +231,9 @@ def test_committed_test_file_is_visible_to_the_toolchain_before_it_runs(tmp_path
     runner = _ReadsFileTestRunner(
         generated_test_path(1), results=[RunResult(returncode=1, stdout="AssertionError")]
     )
-    stage = Stage(MockLLMClient(responses=[_ONE_TEST]), MockLLMClient(responses=[_APPROVE]), MockGitHubClient(issues=[Issue(number=1)]), runner)
+    gh = MockGitHubClient(issues=[Issue(number=1)])
+    gh.create_branch(branch_name(1))
+    stage = Stage(MockLLMClient(responses=[_ONE_TEST]), MockLLMClient(responses=[_APPROVE]), gh, runner)
 
     result = stage.run(1, _DESIGN, cwd=str(tmp_path))
 

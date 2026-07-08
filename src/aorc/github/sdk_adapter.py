@@ -253,6 +253,19 @@ class SdkGitHubClient(GitHubClient):
     def merge_pull_request(self, number: int, method: str = "merge") -> None:
         self._r().get_pull(number).merge(merge_method=method)
 
+    def create_branch(self, branch: str, from_ref: str | None = None) -> None:
+        from github import GithubException  # lazy: only when a real call is made
+
+        try:
+            self._r().get_git_ref(f"heads/{branch}")
+            return  # already exists: idempotent no-op (re-dispatch)
+        except GithubException as e:
+            if e.status != 404:
+                raise
+        base = from_ref if from_ref is not None else self._r().default_branch
+        sha = self._r().get_git_ref(f"heads/{base}").object.sha
+        self._r().create_git_ref(ref=f"refs/heads/{branch}", sha=sha)
+
     def delete_branch(self, branch: str) -> None:
         self._r().get_git_ref(f"heads/{branch}").delete()
 

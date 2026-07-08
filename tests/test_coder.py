@@ -37,6 +37,8 @@ _OUT_OF_SCOPE = json.dumps(
 def _stage(responses, test_results=None, **kwargs):
     llm = MockLLMClient(responses=responses)
     gh = MockGitHubClient(issues=[Issue(number=1)])
+    # S29: branch creation is the driver's job, before any stage runs.
+    gh.create_branch(branch_name(1))
     runner = MockTestRunner(results=test_results)
     stage = Stage(llm, gh, runner, **kwargs)
     return stage, llm, gh, runner
@@ -261,6 +263,7 @@ def test_committed_code_is_visible_to_the_toolchain_before_it_runs(tmp_path):
     runner = _ReadsFileTestRunner("src/aorc/add.py")
     llm = MockLLMClient(responses=[_ONE_TASK])
     gh = MockGitHubClient(issues=[Issue(number=1)])
+    gh.create_branch(branch_name(1))
     stage = Stage(llm, gh, runner)
 
     result = stage.run(1, _DESIGN, cwd=str(tmp_path))
@@ -281,6 +284,7 @@ def test_worktree_sync_happens_again_on_every_fix_loop_attempt(tmp_path):
     )
     llm = MockLLMClient(responses=[_ONE_TASK, second_task])
     gh = MockGitHubClient(issues=[Issue(number=1)])
+    gh.create_branch(branch_name(1))
     stage = Stage(llm, gh, runner)
 
     result = stage.run(1, _DESIGN, cwd=str(tmp_path))

@@ -277,6 +277,12 @@ class ScrubbingGitHubClient(GitHubClient):
     def merge_pull_request(self, number: int, method: str = "merge") -> None:
         return self._inner.merge_pull_request(number, method)
 
+    def create_branch(self, branch: str, from_ref: str | None = None) -> None:
+        # branch names are agent-authored text too (S16), same as commit_file
+        return self._inner.create_branch(
+            scrub(branch), None if from_ref is None else scrub(from_ref)
+        )
+
     def delete_branch(self, branch: str) -> None:
         return self._inner.delete_branch(branch)
 

@@ -37,6 +37,8 @@ def _stage(reviewer_responses, coder_responses=None, test_results=None, gh=None,
     reviewer_llm = MockLLMClient(responses=reviewer_responses)
     coder_llm = MockLLMClient(responses=coder_responses or [])
     gh = gh or MockGitHubClient(issues=[Issue(number=1)])
+    # S29: branch creation is the driver's job, before any stage runs.
+    gh.create_branch(branch_name(1))
     runner = MockTestRunner(results=test_results)
     coder = CoderStage(coder_llm, gh, runner)
     stage = Stage(reviewer_llm, coder, gh, runner, **kwargs)

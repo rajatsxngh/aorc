@@ -440,6 +440,9 @@ class InstallHandler:
                 return pr.number
         if github.get_file(CONFIG_PATH, "main") is not None:
             return 0  # config already merged: nothing to open
+        # S29: the contents API never auto-creates a branch -- same fix as
+        # the pipeline driver's per-issue branch.
+        github.create_branch(CONFIG_PR_BRANCH)
         github.commit_file(
             CONFIG_PR_BRANCH,
             CONFIG_PATH,
