@@ -95,6 +95,68 @@ def marker_path(issue_number: int) -> str:
     return f"aorc/issue-{issue_number}/tests.marker"
 
 
+# --------------------------------------------------------------------------- #
+# S40: interface stubs -- the red-vs-error catch-22 fix
+# --------------------------------------------------------------------------- #
+# The generated tests run before any implementation exists, so without help
+# they die with NameError/ImportError -- which the classifier (correctly)
+# calls "error", not "red", and the stage can never proceed. Seeding each
+# interface function as a NotImplementedError stub (and importing it in the
+# generated test) turns "not implemented yet" into a clean runtime failure
+# the classifier calls "red", while keeping the error markers honest for
+# genuinely broken test code. The coder replaces the stub wholesale (it
+# writes full file contents to the design's `files`).
+
+_STUB_HEADER = '"""AORC interface stubs -- replaced by the coder stage."""'
+
+
+def implementation_module(files: list) -> tuple[str, str] | None:
+    """(path, importable module name) of the design's first implementation
+    file: the first `.py` entry not under tests/, with a src-layout prefix
+    stripped (v1 supports the single-implementation-module common case)."""
+    for path in files:
+        if not isinstance(path, str) or not path.endswith(".py"):
+            continue
+        norm = path.replace("\\", "/").lstrip("./")
+        if norm.startswith("tests/") or "/tests/" in norm:
+            continue
+        module = norm[: -len(".py")]
+        if module.startswith("src/"):
+            module = module[len("src/"):]
+        module = module.strip("/").replace("/", ".")
+        if module.endswith(".__init__"):
+            module = module[: -len(".__init__")]
+        return path, module
+    return None
+
+
+def _interface_names(interface: list) -> list[str]:
+    names = []
+    for item in interface:
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            name = item["name"]
+            if name.isidentifier():  # dotted/odd names cannot be stubbed as defs
+                names.append(name)
+    return names
+
+
+def _stub_defs(names: list[str]) -> str:
+    lines = []
+    for name in names:
+        lines.append(f"def {name}(*args, **kwargs):")
+        lines.append(f'    raise NotImplementedError("{name} is not implemented yet (AORC stub)")')
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def interface_stub_source(names: list[str]) -> str:
+    return f"{_STUB_HEADER}\n\n{_stub_defs(names)}"
+
+
+def import_header(module: str, names: list[str]) -> str:
+    return f"from {module} import {', '.join(names)}\n\n" if names else ""
+
+
 @dataclass
 class TesterDoc:
     tests: list
@@ -349,6 +411,14 @@ class TesterStage:
                     )
                 return TesterResult(status="agent-blocked", code=None, attempts=0, reason=reason)
 
+        # S40: seed interface stubs once, before any test runs -- imports must
+        # resolve so a missing implementation fails "red", never "error".
+        target = implementation_module(design.files)
+        names = _interface_names(design.interface)
+        header = import_header(target[1], names) if target else ""
+        if target and names:
+            self._seed_stubs(issue_number, target[0], names, cwd)
+
         attempts = 0
         reasons: list[str] = []  # S31: one line per failed attempt
         if self._setup_command:
@@ -388,14 +458,17 @@ class TesterStage:
                 feedback = verdict.reason
                 continue  # off-spec -- retry the tester, now with the reason
 
-            self._commit(issue_number, doc.code)
+            # S40: prepend the deterministic interface import -- the model's
+            # tests routinely call the interface bare (NameError otherwise).
+            code = header + doc.code
+            self._commit(issue_number, code)
             # S22 split-brain fix: same ordering pin as `CoderStage` -- mirror
             # the committed test source into `cwd` before the toolchain runs.
-            write_worktree_file(cwd, generated_test_path(issue_number), doc.code)
+            write_worktree_file(cwd, generated_test_path(issue_number), code)
             run_result = self._test_runner.run(cwd, self._test_command)
             classification = classify_test_run(run_result)
             if classification == "red":
-                return TesterResult(status="proceed", code=doc.code, attempts=attempts)
+                return TesterResult(status="proceed", code=code, attempts=attempts)
             if classification == "infra-fail":
                 # S33: the exec target is gone -- regenerating tests cannot
                 # fix that, so hard-fail now instead of burning retries.
@@ -414,6 +487,26 @@ class TesterStage:
             )
 
         return TesterResult(status="agent-blocked", code=None, attempts=attempts, reason="\n".join(reasons))
+
+    def _seed_stubs(self, issue_number: int, path: str, names: list[str], cwd: str) -> None:
+        """Commit + mirror NotImplementedError stubs for the interface names
+        the implementation file doesn't define yet. A file that already
+        defines every name is left untouched; a missing file is created
+        whole. The coder overwrites this with the real implementation (it
+        writes full file contents to the design's `files`)."""
+        branch = branch_name(issue_number)
+        existing = self._github.get_file(path, branch)
+        if existing is None:
+            content = interface_stub_source(names)
+        else:
+            missing = [n for n in names if f"def {n}" not in existing and f"{n} =" not in existing]
+            if not missing:
+                return
+            content = existing.rstrip() + "\n\n\n" + _stub_defs(missing)
+        self._github.commit_file(
+            branch, path, content, message=f"test: issue #{issue_number} interface stubs"
+        )
+        write_worktree_file(cwd, path, content)
 
     def _commit(self, issue_number: int, code: str) -> None:
         branch = branch_name(issue_number)

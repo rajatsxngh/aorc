@@ -250,7 +250,10 @@ def test_committed_test_file_is_visible_to_the_toolchain_before_it_runs(tmp_path
     result = stage.run(1, _DESIGN, cwd=str(tmp_path))
 
     assert result.status == "proceed"
-    assert runner.seen_content == ["def test_add():\n    assert add(1, 2) == 3\n"]
+    # S40: the mirrored file carries the deterministic interface import.
+    assert runner.seen_content == [
+        "from aorc.add import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    ]
 
 
 # ---- S27: ContainerTestRunner -- docker exec into the issue's container --- #
@@ -439,6 +442,80 @@ def test_generated_test_path_lives_under_the_projects_tests_dir():
     generated tests ever running. Unique filename per issue, inside the
     conventional tests/ root."""
     assert generated_test_path(7) == "tests/test_aorc_issue_7.py"
+
+
+# ---- S40: interface stubs make missing-implementation failures clean red --- #
+
+
+def test_implementation_module_derives_the_module_from_the_files_list():
+    from aorc.tester import implementation_module
+
+    assert implementation_module(["src/sandbox/math_utils.py"]) == (
+        "src/sandbox/math_utils.py",
+        "sandbox.math_utils",
+    )
+    assert implementation_module(["math_utils.py"]) == ("math_utils.py", "math_utils")
+    # tests/ entries and non-Python files are never the implementation module
+    assert implementation_module(["tests/test_x.py", "docs/readme.md"]) is None
+    assert implementation_module([]) is None
+
+
+def test_interface_stubs_are_committed_and_mirrored_before_the_test_run(tmp_path):
+    """The generated tests run before any implementation exists; without a
+    stub the run dies NameError/ImportError -> 'error' -> block (the
+    red-vs-error catch-22, hit live on issue 19)."""
+    red = RunResult(returncode=1, stdout="FAILED - NotImplementedError")
+    stage, tester_llm, critic_llm, gh, runner = _stage([_ONE_TEST], [_APPROVE], test_results=[red])
+
+    result = stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    assert result.status == "proceed"
+    stub = gh.get_file("src/aorc/add.py", branch_name(1))
+    assert stub is not None
+    assert "def add" in stub
+    assert "NotImplementedError" in stub
+    mirrored = (tmp_path / "src" / "aorc" / "add.py").read_text()
+    assert "NotImplementedError" in mirrored
+
+
+def test_generated_test_gets_an_import_header_for_the_interface(tmp_path):
+    """Live evidence: real Claude's tests call the interface bare
+    (NameError) -- a stub module alone cannot fix that. AORC prepends a
+    deterministic import of the interface names from the implementation
+    module."""
+    red = RunResult(returncode=1, stdout="FAILED - NotImplementedError")
+    stage, tester_llm, critic_llm, gh, runner = _stage([_ONE_TEST], [_APPROVE], test_results=[red])
+
+    result = stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    assert result.status == "proceed"
+    committed = gh.get_file(generated_test_path(1), branch_name(1))
+    assert committed.startswith("from aorc.add import add")
+    mirrored = (tmp_path / generated_test_path(1)).read_text()
+    assert mirrored.startswith("from aorc.add import add")
+
+
+def test_stubs_append_missing_names_to_an_existing_implementation_file(tmp_path):
+    red = RunResult(returncode=1, stdout="FAILED - NotImplementedError")
+    stage, tester_llm, critic_llm, gh, runner = _stage([_ONE_TEST], [_APPROVE], test_results=[red])
+    gh.add_file(branch_name(1), "src/aorc/add.py", "def other():\n    return 1\n")
+
+    stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    content = gh.get_file("src/aorc/add.py", branch_name(1))
+    assert "def other():" in content  # existing code preserved
+    assert "def add" in content and "NotImplementedError" in content
+
+
+def test_stubs_do_not_touch_a_file_that_already_defines_the_interface(tmp_path):
+    existing = "def add(a, b):\n    return a + b\n"
+    red = RunResult(returncode=1, stdout="AssertionError")
+    stage, tester_llm, critic_llm, gh, runner = _stage([_ONE_TEST], [_APPROVE], test_results=[red])
+    gh.add_file(branch_name(1), "src/aorc/add.py", existing)
+
+    stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    assert gh.get_file("src/aorc/add.py", branch_name(1)) == existing
 
 
 # ---- S37: setup runs (once) before the attempt loop ------------------------ #
