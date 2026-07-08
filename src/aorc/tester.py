@@ -66,8 +66,10 @@ _TESTER_SYSTEM_PROMPT = (
     '"code": "<python test function source, calling only functions listed '
     'in `interface`>"}, ...]}. Write exactly one test per test_specs '
     "entry, in test_specs order -- behavioral tests only, never tests of "
-    "file existence or implementation steps. Reply with the JSON object "
-    "only, no surrounding prose."
+    "file existence or implementation steps. Import the functions under "
+    "test only from the module named in `implementation_module`; never "
+    "guess another module path. Reply with the JSON object only, no "
+    "surrounding prose."
 )
 
 _CRITIC_SYSTEM_PROMPT = (
@@ -155,6 +157,27 @@ def interface_stub_source(names: list[str]) -> str:
 
 def import_header(module: str, names: list[str]) -> str:
     return f"from {module} import {', '.join(names)}\n\n" if names else ""
+
+
+def normalize_interface_imports(code: str, module: str, names: list[str]) -> str:
+    """S41: drop the model's own imports of interface names from any module
+    other than the derived one -- live, the tester guessed
+    `from math_utils import divide` against the real sandbox.math_utils,
+    and a wrong module-level import kills the whole file with
+    ModuleNotFoundError before the correct header can matter. The
+    deterministic `import_header` is the single source of truth for where
+    the interface lives; unrelated imports pass through untouched."""
+    name_set = set(names)
+    out = []
+    for line in code.splitlines():
+        match = re.match(r"\s*from\s+([\w.]+)\s+import\s+(.+)", line)
+        if match and match.group(1) != module:
+            imported = {part.split(" as ")[0].strip() for part in match.group(2).split(",")}
+            if imported and imported <= name_set:
+                continue  # wrong-module interface import -- the header covers it
+        out.append(line)
+    normalized = "\n".join(out)
+    return normalized + "\n" if code.endswith("\n") and not normalized.endswith("\n") else normalized
 
 
 @dataclass
@@ -367,16 +390,22 @@ class TesterStage:
         self._test_command = test_command
         self._setup_command = setup_command
 
-    def _tester_messages(self, design: DesignDoc, feedback: str | None = None) -> list[Message]:
+    def _tester_messages(
+        self, design: DesignDoc, feedback: str | None = None, module: str | None = None
+    ) -> list[Message]:
         # Scoped to the design's interface/test_specs only -- never
         # task_list (implementation steps: the coder's contract, S36),
-        # repo files, or implementation code. `feedback` is the critic's
-        # rejection reason from the previous attempt -- same retry-prompt
-        # slot pattern as the coder's failure summary.
+        # repo files, or implementation code. `module` is the derived
+        # implementation module (S41) so the model never guesses an import
+        # path; `feedback` is the critic's rejection reason from the
+        # previous attempt -- same retry-prompt slot pattern as the coder's
+        # failure summary.
         parts = [
             f"interface: {json.dumps(design.interface)}",
             f"test_specs: {json.dumps(design.test_specs)}",
         ]
+        if module is not None:
+            parts.append(f"implementation_module: {module}")
         if feedback is not None:
             parts.append(f"Previous attempt was rejected by the test-critic: {feedback}")
         return [Message("system", _TESTER_SYSTEM_PROMPT), Message("user", "\n".join(parts))]
@@ -426,8 +455,9 @@ class TesterStage:
             # answer "did setup run?" directly in the block reason.
             reasons.append("setup: ok (returncode=0)")
         feedback: str | None = None  # S36: critic's rejection reason, fed to the retry
+        module = target[1] if target else None
         for attempts in range(1, self._max_retries + 1):
-            completion = self._tester_llm.complete(self._tester_messages(design, feedback))
+            completion = self._tester_llm.complete(self._tester_messages(design, feedback, module))
             doc = parse_tester_response(completion.text)
             if doc is None:
                 reasons.append(
@@ -460,7 +490,12 @@ class TesterStage:
 
             # S40: prepend the deterministic interface import -- the model's
             # tests routinely call the interface bare (NameError otherwise).
-            code = header + doc.code
+            # S41: and strip its own wrong-module interface imports, which
+            # would kill the file with ModuleNotFoundError regardless.
+            body = (
+                normalize_interface_imports(doc.code, module, names) if module else doc.code
+            )
+            code = header + body
             self._commit(issue_number, code)
             # S22 split-brain fix: same ordering pin as `CoderStage` -- mirror
             # the committed test source into `cwd` before the toolchain runs.

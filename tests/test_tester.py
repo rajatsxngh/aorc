@@ -518,6 +518,64 @@ def test_stubs_do_not_touch_a_file_that_already_defines_the_interface(tmp_path):
     assert gh.get_file("src/aorc/add.py", branch_name(1)) == existing
 
 
+# ---- S41: generated-test imports must agree with the derived module -------- #
+
+
+def test_normalize_interface_imports_drops_wrong_module_imports():
+    from aorc.tester import normalize_interface_imports
+
+    code = (
+        "from math_utils import add\n"
+        "import json\n"
+        "from sandbox.other import helper\n"
+        "\n"
+        "def test_add():\n"
+        "    assert add(1, 2) == 3\n"
+    )
+    normalized = normalize_interface_imports(code, "aorc.add", ["add"])
+    assert "from math_utils import add" not in normalized
+    assert "import json" in normalized  # unrelated imports untouched
+    assert "from sandbox.other import helper" in normalized  # not interface names
+    assert "def test_add():" in normalized
+
+
+def test_normalize_interface_imports_keeps_the_correct_module_import():
+    from aorc.tester import normalize_interface_imports
+
+    code = "from aorc.add import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    assert normalize_interface_imports(code, "aorc.add", ["add"]) == code
+
+
+def test_wrong_module_import_in_generated_test_is_normalized_away(tmp_path):
+    """Live: the model guessed `from math_utils import divide` while the
+    real module is sandbox.math_utils -- the wrong import at module level
+    killed the file with ModuleNotFoundError before the correct header
+    could matter."""
+    wrong_import_test = json.dumps(
+        {"tests": [{"spec": "add(1, 2) == 3",
+                    "code": "from math_utils import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"}]}
+    )
+    red = RunResult(returncode=1, stdout="FAILED - NotImplementedError")
+    stage, tester_llm, critic_llm, gh, runner = _stage([wrong_import_test], [_APPROVE], test_results=[red])
+
+    result = stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    assert result.status == "proceed"
+    committed = gh.get_file(generated_test_path(1), branch_name(1))
+    assert committed.startswith("from aorc.add import add")
+    assert "from math_utils import" not in committed
+
+
+def test_tester_prompt_names_the_implementation_module(tmp_path):
+    red = RunResult(returncode=1, stdout="FAILED - NotImplementedError")
+    stage, tester_llm, *_ = _stage([_ONE_TEST], [_APPROVE], test_results=[red])
+
+    stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    user = tester_llm.calls[0][0][1].content
+    assert "implementation_module: aorc.add" in user
+
+
 # ---- S37: setup runs (once) before the attempt loop ------------------------ #
 
 
