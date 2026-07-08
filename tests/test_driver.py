@@ -407,6 +407,61 @@ def test_driver_resume_at_in_code_with_fresh_worktree_sees_earlier_committed_tes
     assert (Path(cwd) / "tests" / "test_aorc_issue_1.py").exists()
 
 
+# ---- S42: live repro -- unqualified design paths poison every stage -------- #
+
+
+def test_unqualified_design_file_path_is_resolved_before_the_tester_runs(tmp_path):
+    """Reproduces the live issue-21 failure end-to-end: the design LLM said
+    files=["math_utils.py"] while the real module is src/sandbox/
+    math_utils.py. Before S42 the whole chain was consistently wrong --
+    module derived as "math_utils", prompt taught the model the wrong
+    module, header imported it, the stripper kept it, the stub landed at
+    the repo root -- and S41's unit tests (fed a well-formed design)
+    couldn't see any of it."""
+    (tmp_path / "src" / "sandbox").mkdir(parents=True)
+    (tmp_path / "src" / "sandbox" / "math_utils.py").write_text(
+        "def multiply(a, b):\n    return a * b\n"
+    )
+    bad_path_design = json.dumps(
+        {
+            "interface": [{"name": "divide", "inputs": ["a", "b"], "outputs": "float"}],
+            "test_specs": ["divide(10, 2) == 5.0"],
+            "task_list": ["implement divide()"],
+            "files": ["math_utils.py"],  # the live LLM's unqualified guess
+            "confidence": 0.9,
+        }
+    )
+    wrong_import_tests = json.dumps(
+        {"tests": [{"spec": "divide(10, 2) == 5.0",
+                    "code": "from math_utils import divide\n\ndef test_divide():\n    assert divide(10, 2) == 5.0\n"}]}
+    )
+    one_task = json.dumps(
+        {"tasks": [{"task": "implement divide()", "path": "src/sandbox/math_utils.py",
+                    "code": "def multiply(a, b):\n    return a * b\n\ndef divide(a, b):\n    return a / b\n"}]}
+    )
+    driver, gh, llms, runner = _build_driver(
+        tmp_path,
+        design_responses=[bad_path_design],
+        tester_responses=[wrong_import_tests],
+        coder_responses=[one_task],
+        test_results=[
+            RunResult(returncode=1, stdout="FAILED - NotImplementedError"),  # tester: red
+            RunResult(returncode=0),  # coder: green
+        ],
+    )
+
+    result = driver.run(1)
+
+    assert result.status == "proceed"
+    committed_test = gh.get_file("tests/test_aorc_issue_1.py", branch_name(1))
+    assert committed_test.startswith("from sandbox.math_utils import divide")
+    assert "from math_utils import" not in committed_test
+    # the stub was appended to the REAL module, and no stray root file exists
+    stub_target = gh.get_file("src/sandbox/math_utils.py", branch_name(1))
+    assert stub_target is not None and "divide" in stub_target
+    assert gh.get_file("math_utils.py", branch_name(1)) is None
+
+
 # ---- S31: blocking posts the stage + reason to the issue ------------------- #
 
 

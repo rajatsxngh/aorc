@@ -18,6 +18,7 @@ response is a pure, mechanical schema check -- no LLM judgment:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 
 from .graphify import GraphifyClient
@@ -37,6 +38,10 @@ _SYSTEM_PROMPT = (
     '  "test_specs": [ "behavior to test", ... ]\n'
     '  "task_list": [ "ordered implementation step", ... ]\n'
     '  "files": [ "exact/file/path.py", ... ]\n'
+    "Every `files` entry must be the exact repo-relative path of the file "
+    "(e.g. src/pkg/module.py for a src-layout package), matching an existing "
+    "file's real location when the file already exists -- never a bare "
+    "filename.\n"
     '  "confidence": 0.0-1.0\n'
     "If the issue cannot be bounded into a finite interface, test list, and task "
     "list, still reply with the JSON schema but set confidence low. Reply with "
@@ -86,6 +91,37 @@ def parse_design_response(text: str) -> DesignDoc | None:
         confidence=confidence,
         raw=data,
     )
+
+
+# Directories never containing design-relevant source files.
+_RESOLVE_SKIP_DIRS = {".git", "__pycache__", ".aorc", ".aorc-worktrees", "node_modules", ".venv"}
+
+
+def resolve_design_files(files: list, cwd: str) -> list:
+    """S42: snap the design's `files` entries to real worktree paths. The
+    design LLM emits unqualified paths ("math_utils.py" for a module that
+    actually lives at src/sandbox/math_utils.py), and every downstream
+    consumer -- module derivation, stub seeding, import header/normalizer,
+    the coder's writes -- inherits the error consistently, so nothing ever
+    fails loudly. An entry that exists at its stated path is kept; a
+    missing entry whose basename matches exactly one file in the tree is
+    snapped to that file; new or ambiguous entries are kept verbatim
+    (never guessed)."""
+    resolved = []
+    for entry in files:
+        if not isinstance(entry, str) or os.path.exists(os.path.join(cwd, entry)):
+            resolved.append(entry)
+            continue
+        basename = os.path.basename(entry)
+        matches = []
+        for root, dirs, names in os.walk(cwd):
+            dirs[:] = [d for d in dirs if d not in _RESOLVE_SKIP_DIRS]
+            if basename in names:
+                matches.append(
+                    os.path.relpath(os.path.join(root, basename), cwd).replace(os.sep, "/")
+                )
+        resolved.append(matches[0] if len(matches) == 1 else entry)
+    return resolved
 
 
 def checkpoint_report(issue_number: int, doc: DesignDoc) -> CheckpointReport:

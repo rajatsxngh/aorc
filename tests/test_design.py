@@ -237,3 +237,51 @@ def test_parse_design_response_accepts_a_fenced_response():
     doc = parse_design_response(f"Sure!\n```json\n{_VALID}\n```")
     assert doc is not None
     assert doc.confidence == 0.9
+
+
+# ---- S42: design file paths resolved against the real worktree tree -------- #
+
+
+def test_resolve_design_files_snaps_a_bare_basename_to_its_real_path(tmp_path):
+    from aorc.design import resolve_design_files
+
+    (tmp_path / "src" / "sandbox").mkdir(parents=True)
+    (tmp_path / "src" / "sandbox" / "math_utils.py").write_text("def multiply(a, b): ...\n")
+
+    resolved = resolve_design_files(["math_utils.py"], str(tmp_path))
+
+    assert resolved == ["src/sandbox/math_utils.py"]
+
+
+def test_resolve_design_files_keeps_exact_existing_paths(tmp_path):
+    from aorc.design import resolve_design_files
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "x.py").write_text("")
+
+    assert resolve_design_files(["src/x.py"], str(tmp_path)) == ["src/x.py"]
+
+
+def test_resolve_design_files_keeps_new_and_ambiguous_entries(tmp_path):
+    from aorc.design import resolve_design_files
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "dup.py").write_text("")
+    (tmp_path / "b" / "dup.py").write_text("")
+
+    # brand-new file: nothing to snap to -> kept verbatim
+    assert resolve_design_files(["src/new_module.py"], str(tmp_path)) == ["src/new_module.py"]
+    # two candidates: ambiguous -> kept verbatim rather than guessed
+    assert resolve_design_files(["dup.py"], str(tmp_path)) == ["dup.py"]
+
+
+def test_resolve_design_files_ignores_vcs_and_cache_dirs(tmp_path):
+    from aorc.design import resolve_design_files
+
+    (tmp_path / ".git" / "sub").mkdir(parents=True)
+    (tmp_path / ".git" / "sub" / "math_utils.py").write_text("")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "math_utils.py").write_text("")
+
+    assert resolve_design_files(["math_utils.py"], str(tmp_path)) == ["src/math_utils.py"]

@@ -46,7 +46,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .coder import CoderStage
-from .design import DesignDoc, DesignStage, design_doc_path, parse_design_response
+from .design import (
+    DesignDoc,
+    DesignStage,
+    design_doc_path,
+    parse_design_response,
+    resolve_design_files,
+)
 from .guards import BLOCKED_LABEL
 from .harness import WorktreeManager
 from .interfaces import GitHubClient, PullRequest
@@ -138,6 +144,15 @@ class PipelineDriver:
 
         if design_doc is None:
             design_doc = self._load_design_doc(issue_number)
+
+        if design_doc is not None:
+            # S42: snap the design's file paths to the real worktree tree
+            # before ANY stage consumes them -- an unqualified path
+            # ("math_utils.py" for src/sandbox/math_utils.py) otherwise
+            # poisons module derivation, stub seeding, the generated test's
+            # imports, and the coder's writes, all consistently, so nothing
+            # fails loudly (live issue 21).
+            design_doc.files = resolve_design_files(design_doc.files, cwd)
 
         if label == "in-test":
             if self._artifacts.tests_committed(issue_number):
