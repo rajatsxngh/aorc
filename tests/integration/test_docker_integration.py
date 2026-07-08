@@ -7,6 +7,7 @@ real pre-baked AORC base image in CI).
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 
@@ -50,10 +51,14 @@ def test_start_and_teardown_real_container(tmp_path):
     )
     runtime = DockerContainerRuntime(image)
 
+    # S30: pass a RELATIVE worktree path — what WorktreeManager yields under
+    # the default relative `.aorc-worktrees`. The runtime must resolve it to
+    # an absolute host path or real `docker run` rejects the -v mount (125).
+    relative_worktree = os.path.relpath(tmp_path, os.getcwd())
     handle = runtime.start(
         _ISSUE,
         f"aorc/issue-{_ISSUE}",
-        str(tmp_path),
+        relative_worktree,
         env={"AORC_SMOKE": "smoke-value"},
     )
     try:
@@ -62,9 +67,14 @@ def test_start_and_teardown_real_container(tmp_path):
         env_out = _inspect(handle.container_id, "{{.Config.Env}}")
         assert env_out.returncode == 0
         assert "AORC_SMOKE=smoke-value" in env_out.stdout
-        # The worktree is mounted at /workspace.
-        mounts = _inspect(handle.container_id, "{{json .Mounts}}")
-        assert "/workspace" in mounts.stdout
+        # The worktree is mounted at /workspace, from an absolute host path
+        # (S30 — a relative -v source never even starts the container).
+        mounts_out = _inspect(handle.container_id, "{{json .Mounts}}")
+        assert mounts_out.returncode == 0
+        mounts = json.loads(mounts_out.stdout)
+        workspace = [m for m in mounts if m["Destination"] == "/workspace"]
+        assert len(workspace) == 1
+        assert os.path.isabs(workspace[0]["Source"])
     finally:
         runtime.teardown(handle)
 

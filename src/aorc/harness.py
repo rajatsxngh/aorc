@@ -160,6 +160,10 @@ class DockerContainerRuntime(ContainerRuntime):
         env: dict[str, str] | None = None,
     ) -> ContainerHandle:
         name = container_name_for(issue_number)
+        # Docker's `-v` rejects a relative host source (exit 125); the
+        # composition root wires WorktreeManager with the relative
+        # `.aorc-worktrees`, so resolve here, at the mount boundary.
+        mount_source = os.path.abspath(worktree_path)
         # Secrets must never ride in argv: `docker run -e KEY=value` exposes
         # the value to every user on the host via `ps`. Deliver env through a
         # 0600 temp env-file instead, removed the moment `docker run` returns
@@ -178,7 +182,7 @@ class DockerContainerRuntime(ContainerRuntime):
                 [
                     "docker", "run", "-d", "--name", name,
                     *env_args,
-                    "-v", f"{worktree_path}:/workspace",
+                    "-v", f"{mount_source}:/workspace",
                     "-w", "/workspace",
                     self._base_image,
                 ],

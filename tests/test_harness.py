@@ -514,6 +514,28 @@ def test_docker_start_env_file_removed_even_when_docker_fails(monkeypatch):
     assert not os.path.exists(fake.env_file_path)
 
 
+def test_docker_start_mounts_worktree_at_absolute_path(monkeypatch):
+    """S30: Docker's `-v` requires an absolute host source; a relative
+    worktree path (what `WorktreeManager` yields under the default relative
+    `.aorc-worktrees`) must be resolved before it reaches argv, or the real
+    `docker run` fails with exit status 125."""
+    import os
+
+    from aorc.harness import DockerContainerRuntime
+
+    fake = _FakeDockerRun()
+    monkeypatch.setattr("aorc.harness.subprocess.run", fake)
+    runtime = DockerContainerRuntime("base:img")
+
+    runtime.start(7, "aorc/issue-7", ".aorc-worktrees/issue-7", env=None)
+
+    mount = fake.argv[fake.argv.index("-v") + 1]
+    source, destination = mount.rsplit(":", 1)
+    assert destination == "/workspace"
+    assert os.path.isabs(source)
+    assert source == os.path.abspath(".aorc-worktrees/issue-7")
+
+
 def test_docker_start_without_env_passes_no_env_file(monkeypatch):
     from aorc.harness import DockerContainerRuntime
 
