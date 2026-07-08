@@ -798,6 +798,78 @@ def test_run_issue_prints_pipeline_stage_status_and_reason(capsys):
     assert "attempt 1: tester response failed schema check" in out
 
 
+def test_run_issue_runs_setup_before_tests_through_the_full_driver_path(tmp_path, monkeypatch):
+    """S38 end-to-end wiring pin: config file -> load_config -> compose ->
+    run-issue -> ConfigGatedWakeLoop.dispatch_issue -> PipelineDriver ->
+    TesterStage. Proves `.aorc.yml`'s setup executes, first, on the real
+    dispatch path -- not merely on a directly-constructed TesterStage.
+    (Verified against the live container too: the S37 setup does run; a
+    ModuleNotFoundError block came from the sandbox repo's own orphan
+    test import, not from missing wiring.)"""
+    import json
+
+    from aorc.config import load_config
+    from aorc.tester import MockTestRunner, TestRunResult
+
+    cfg_path = tmp_path / "sandbox.aorc.yml"
+    cfg_path.write_text(VALID_CONFIG)
+    config = load_config(cfg_path)
+
+    recorder = MockTestRunner(
+        results=[
+            TestRunResult(returncode=0),  # tester's setup
+            TestRunResult(returncode=1, stdout="AssertionError: red"),  # tester's pytest
+            TestRunResult(returncode=0),  # coder's setup
+            TestRunResult(returncode=0),  # coder's pytest (green)
+        ]
+    )
+    monkeypatch.setattr("aorc.__main__.SubprocessTestRunner", lambda: recorder)
+
+    design = json.dumps(
+        {
+            "interface": [{"name": "add", "inputs": ["a", "b"], "outputs": "int"}],
+            "test_specs": ["add(1, 2) == 3"],
+            "task_list": ["implement add()"],
+            "files": ["src/add.py"],
+            "confidence": 0.9,
+        }
+    )
+    tests = json.dumps(
+        {"tests": [{"spec": "add(1, 2) == 3", "code": "def test_add():\n    assert add(1, 2) == 3\n"}]}
+    )
+    approve = json.dumps({"verdict": "approve", "reason": "ok"})
+    coder = json.dumps(
+        {"tasks": [{"task": "implement add()", "path": "src/add.py", "code": "def add(a, b):\n    return a + b\n"}]}
+    )
+
+    gh = MockGitHubClient(issues=[Issue(number=7, title="t", body="do a bounded thing", labels=[])])
+    gh.add_file("main", ".aorc.yml", VALID_CONFIG)
+
+    class TmpWorktrees:
+        def ensure(self, issue_number: int) -> str:
+            path = tmp_path / f"issue-{issue_number}"
+            path.mkdir(exist_ok=True)
+            return str(path)
+
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=gh,
+        runtime=MockContainerRuntime(),
+        worktrees=TmpWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(responses=[design, tests, approve, coder, approve]),
+        no_container=True,
+    )
+
+    code = run(["run-issue", "7"], collaborators=collaborators)
+
+    assert code == 0
+    worktree = str(tmp_path / "issue-7")
+    assert recorder.calls[0] == (worktree, "pip install -e .")  # setup runs FIRST
+    assert recorder.calls[1] == (worktree, "pytest -q")  # then the tester's tests
+
+
 def test_run_issue_without_config_parks_under_awaiting_config():
     collaborators = make_collaborators(
         issues=[Issue(number=9, title="Do a thing", body="x", labels=[])]

@@ -345,6 +345,10 @@ class TesterStage:
 
         attempts = 0
         reasons: list[str] = []  # S31: one line per failed attempt
+        if self._setup_command:
+            # S38: a later block was misread live as "setup never ran" --
+            # answer "did setup run?" directly in the block reason.
+            reasons.append("setup: ok (returncode=0)")
         feedback: str | None = None  # S36: critic's rejection reason, fed to the retry
         for attempts in range(1, self._max_retries + 1):
             completion = self._tester_llm.complete(self._tester_messages(design, feedback))

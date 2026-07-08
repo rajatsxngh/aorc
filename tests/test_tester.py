@@ -482,6 +482,24 @@ def test_setup_infra_failure_blocks_with_the_infra_reason():
     assert "is not running" in result.reason
 
 
+def test_blocked_reason_records_that_setup_succeeded(tmp_path):
+    """S38: a live block was misread as 'setup never ran' when setup had in
+    fact succeeded and the repo's own tests were unimportable. The block
+    reason must answer 'did setup run?' directly."""
+    error = RunResult(returncode=2, stdout="ModuleNotFoundError: No module named 'sandbox.math_utils'")
+    stage, *_ = _stage(
+        [_ONE_TEST] * 3, [_APPROVE] * 3,
+        test_results=[RunResult(returncode=0)] + [error] * 3,
+        setup_command="pip install -e .",
+    )
+
+    result = stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    assert result.status == "agent-blocked"
+    assert "setup: ok (returncode=0)" in result.reason
+    assert "ModuleNotFoundError" in result.reason
+
+
 def test_no_setup_command_runs_only_the_test_command(tmp_path):
     red = RunResult(returncode=1, stdout="AssertionError")
     stage, tester_llm, critic_llm, gh, runner = _stage([_ONE_TEST], [_APPROVE], test_results=[red])
