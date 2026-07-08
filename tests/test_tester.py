@@ -428,6 +428,70 @@ def test_critic_rejection_reason_feeds_the_next_tester_attempt():
     assert "off-spec" in second_user
 
 
+# ---- S37: setup runs (once) before the attempt loop ------------------------ #
+
+
+def test_setup_command_runs_in_the_container_before_the_test_command(tmp_path):
+    red = RunResult(returncode=1, stdout="AssertionError: assert 4 == 3")
+    stage, tester_llm, critic_llm, gh, runner = _stage(
+        [_ONE_TEST], [_APPROVE], test_results=[RunResult(returncode=0), red],
+        setup_command="pip install -e .",
+    )
+
+    result = stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    assert result.status == "proceed"
+    assert runner.calls[0] == (str(tmp_path), "pip install -e .")
+    assert runner.calls[1] == (str(tmp_path), "pytest -q")
+
+
+def test_failed_setup_blocks_immediately_without_any_llm_calls():
+    """A broken environment cannot be fixed by regenerating tests -- no
+    retries, no LLM tokens, clear reason."""
+    failed = RunResult(returncode=1, stderr="error: externally-managed-environment")
+    stage, tester_llm, critic_llm, gh, runner = _stage(
+        [_ONE_TEST] * 3, [_APPROVE] * 3, test_results=[failed],
+        setup_command="pip install -e .",
+    )
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert tester_llm.calls == []
+    assert critic_llm.calls == []
+    assert "setup" in result.reason
+    assert "returncode=1" in result.reason
+    assert "externally-managed-environment" in result.reason
+
+
+def test_setup_infra_failure_blocks_with_the_infra_reason():
+    dead = RunResult(
+        returncode=1,
+        stderr="Error response from daemon: container aorc-issue-1 is not running",
+    )
+    stage, tester_llm, *_ = _stage(
+        [_ONE_TEST] * 3, [_APPROVE] * 3, test_results=[dead],
+        setup_command="pip install -e .",
+    )
+
+    result = stage.run(1, _DESIGN)
+
+    assert result.status == "agent-blocked"
+    assert tester_llm.calls == []
+    assert "infra" in result.reason
+    assert "is not running" in result.reason
+
+
+def test_no_setup_command_runs_only_the_test_command(tmp_path):
+    red = RunResult(returncode=1, stdout="AssertionError")
+    stage, tester_llm, critic_llm, gh, runner = _stage([_ONE_TEST], [_APPROVE], test_results=[red])
+
+    result = stage.run(1, _DESIGN, cwd=str(tmp_path))
+
+    assert result.status == "proceed"
+    assert runner.calls == [(str(tmp_path), "pytest -q")]
+
+
 # ---- S33: a docker exec infra failure is never a test outcome -------------- #
 
 _NOT_RUNNING = RunResult(

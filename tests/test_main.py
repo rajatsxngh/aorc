@@ -289,6 +289,26 @@ def test_run_fails_closed_on_a_target_repo_error(tmp_path, monkeypatch, capsys):
     assert "expected 'acme/widget'" in capsys.readouterr().err
 
 
+def test_compose_wires_the_setup_command_into_the_tester_stage():
+    """S37: the tester's pytest was the first toolchain command a fresh
+    container ever ran -- `.aorc.yml`'s setup never executed at in-test, so
+    the target package was not installed when the tests ran."""
+    config = parse_config(
+        {"llm": {"primary": {"provider": "claude", "model": "m"}}, "setup": "x", "test": "y"}
+    )
+    collaborators = compose(
+        config,
+        "acme/widget",
+        github=MockGitHubClient(),
+        runtime=MockContainerRuntime(),
+        worktrees=FakeWorktrees(),
+        broker=CredentialBroker("", CountingMinter()),
+        llm=MockLLMClient(),
+    )
+
+    assert collaborators.driver._tester._setup_command == "x"
+
+
 def test_compose_wires_a_container_test_runner_by_default():
     """S27: the live composition path (docker, the config default) must not
     use `SubprocessTestRunner` for the build pipeline -- toolchain commands

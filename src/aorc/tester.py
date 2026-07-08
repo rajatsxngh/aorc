@@ -289,6 +289,7 @@ class TesterStage:
         *,
         max_retries: int = DEFAULT_MAX_RETRIES,
         test_command: str = DEFAULT_TEST_COMMAND,
+        setup_command: str | None = None,
     ) -> None:
         self._tester_llm = tester_llm
         self._critic_llm = critic_llm
@@ -296,6 +297,7 @@ class TesterStage:
         self._test_runner = test_runner
         self._max_retries = max_retries
         self._test_command = test_command
+        self._setup_command = setup_command
 
     def _tester_messages(self, design: DesignDoc, feedback: str | None = None) -> list[Message]:
         # Scoped to the design's interface/test_specs only -- never
@@ -320,6 +322,27 @@ class TesterStage:
         return [Message("system", _CRITIC_SYSTEM_PROMPT), Message("user", "\n".join(parts))]
 
     def run(self, issue_number: int, design: DesignDoc, *, cwd: str = ".") -> TesterResult:
+        # S37: `.aorc.yml`'s setup runs once, before the attempt loop -- the
+        # tester's pytest is the first toolchain command a fresh per-issue
+        # container ever sees, so without this the target package was never
+        # installed at in-test. Fail-fast on a broken environment: no test
+        # regeneration can fix it, so no LLM attempt is ever spent on it.
+        if self._setup_command:
+            setup_result = self._test_runner.run(cwd, self._setup_command)
+            if setup_result.returncode != 0:
+                if classify_test_run(setup_result) == "infra-fail":
+                    reason = (
+                        "toolchain infrastructure failure during setup (docker exec "
+                        f"target unavailable); returncode={setup_result.returncode}; "
+                        f"output tail: {_output_tail(setup_result)}"
+                    )
+                else:
+                    reason = (
+                        f"setup command failed; returncode={setup_result.returncode}; "
+                        f"output tail: {_output_tail(setup_result)}"
+                    )
+                return TesterResult(status="agent-blocked", code=None, attempts=0, reason=reason)
+
         attempts = 0
         reasons: list[str] = []  # S31: one line per failed attempt
         feedback: str | None = None  # S36: critic's rejection reason, fed to the retry

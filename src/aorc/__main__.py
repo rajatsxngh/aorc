@@ -281,7 +281,14 @@ def compose(
             loop.github,
             worktrees,
             DesignStage(llm, loop.github),
-            TesterStage(llm, critic_llm, loop.github, test_runner, test_command=config.test),
+            TesterStage(
+                llm,
+                critic_llm,
+                loop.github,
+                test_runner,
+                test_command=config.test,
+                setup_command=config.setup,
+            ),
             coder_stage,
             reviewer_stage,
         )
