@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;450;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    background: #f6f7f8;
+    color: #1b1b21;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: "cv02","cv03","cv04";
+  }
+  a { color: oklch(0.55 0.13 245); text-decoration: none; }
+  a:hover { color: oklch(0.48 0.14 245); }
+  ::selection { background: oklch(0.9 0.05 245); }
+  @keyframes aorcPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); }
+    50% { box-shadow: 0 0 0 3px var(--pulse, rgba(0,0,0,0.06)); }
+  }
+</style>
+</helmet>
+<div style="display:flex; min-height:100vh; background:#f6f7f8;">
+
+  <!-- SIDEBAR -->
+  <aside style="width:248px; flex:0 0 248px; background:#fbfbfc; border-right:1px solid #ebebef; display:flex; flex-direction:column; position:sticky; top:0; height:100vh;">
+    <div style="padding:20px 18px 16px; display:flex; align-items:center; gap:11px; border-bottom:1px solid #f0f0f3;">
+      <div style="width:32px; height:32px; border-radius:8px; background:#1b1b21; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:15px; letter-spacing:-0.02em; flex:0 0 auto;">A</div>
+      <div style="min-width:0;">
+        <div style="font-size:13.5px; font-weight:600; letter-spacing:-0.01em; line-height:1.2;">aorc / math-utils</div>
+        <div style="font-size:11.5px; color:#9a9aa4; font-family:'IBM Plex Mono',monospace; margin-top:2px;">main</div>
+      </div>
+    </div>
+
+    <!-- nav (future slices live here) -->
+    <nav style="padding:12px 10px 4px; display:flex; flex-direction:column; gap:2px;">
+      <div style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; background:#eef0f2; font-size:13px; font-weight:500; color:#1b1b21;">
+        <span style="width:15px; height:15px; border-radius:4px; border:1.5px solid #7c7c88; display:inline-block;"></span>
+        Status
+      </div>
+      <div style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; font-size:13px; color:#a6a6b0;">
+        <span style="width:15px; height:15px; border-radius:4px; border:1.5px solid #cfcfd6; display:inline-block;"></span>
+        Board
+        <span style="margin-left:auto; font-size:9.5px; letter-spacing:0.04em; text-transform:uppercase; color:#b4b4bd; border:1px solid #e6e6eb; padding:1px 6px; border-radius:20px;">Soon</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; font-size:13px; color:#a6a6b0;">
+        <span style="width:15px; height:15px; border-radius:4px; border:1.5px solid #cfcfd6; display:inline-block;"></span>
+        Chat
+        <span style="margin-left:auto; font-size:9.5px; letter-spacing:0.04em; text-transform:uppercase; color:#b4b4bd; border:1px solid #e6e6eb; padding:1px 6px; border-radius:20px;">Soon</span>
+      </div>
+    </nav>
+
+    <div style="height:1px; background:#f0f0f3; margin:14px 18px;"></div>
+
+    <!-- stage filters -->
+    <div style="padding:0 10px; overflow-y:auto; flex:1;">
+      <div style="font-size:10.5px; font-weight:600; letter-spacing:0.06em; text-transform:uppercase; color:#a6a6b0; padding:0 10px 8px;">Filter by stage</div>
+      <div style="display:flex; flex-direction:column; gap:1px;">
+        <div onClick="{{ selectAll }}" style="display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:8px; font-size:13px; cursor:pointer; background:{{ allBg }}; color:{{ allColor }}; font-weight:{{ allWeight }};" style-hover="background:#f0f0f3;">
+          <span style="width:9px; height:9px; border-radius:3px; background:#c4c4cc; display:inline-block; flex:0 0 auto;"></span>
+          All issues
+          <span style="margin-left:auto; font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:#a6a6b0;">{{ totalCount }}</span>
+        </div>
+        <sc-for list="{{ stageList }}" as="s" hint-placeholder-count="8">
+          <div onClick="{{ s.onClick }}" style="display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:8px; font-size:13px; cursor:pointer; background:{{ s.bg }}; color:{{ s.textColor }}; font-weight:{{ s.weight }};" style-hover="background:#f0f0f3;">
+            <span style="width:9px; height:9px; border-radius:3px; background:{{ s.dot }}; display:inline-block; flex:0 0 auto;"></span>
+            {{ s.label }}
+            <span style="margin-left:auto; font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:#a6a6b0;">{{ s.count }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+    <header style="padding:26px 34px 20px; border-bottom:1px solid #ebebef; background:#f6f7f8; position:sticky; top:0; z-index:5;">
+      <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:20px;">
+        <div>
+          <h1 style="margin:0; font-size:21px; font-weight:600; letter-spacing:-0.02em;">Pipeline status</h1>
+          <p style="margin:6px 0 0; font-size:13.5px; color:#7c7c88; line-height:1.4;">Every issue and where it sits in the design → test → code → review → PR pipeline.</p>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; flex:0 0 auto;">
+          <div style="display:flex; align-items:center; gap:7px; background:#fff; border:1px solid #e8e8ec; border-radius:9px; padding:7px 12px; font-size:12.5px; color:#5b5b66;">
+            <span style="width:8px;height:8px;border-radius:50%;background:oklch(0.62 0.13 245);"></span>
+            <b style="font-weight:600; color:#1b1b21;">{{ progressCount }}</b> in progress
+          </div>
+          <div style="display:flex; align-items:center; gap:7px; background:#fff; border:1px solid #e8e8ec; border-radius:9px; padding:7px 12px; font-size:12.5px; color:#5b5b66;">
+            <span style="width:8px;height:8px;border-radius:50%;background:oklch(0.72 0.14 70);"></span>
+            <b style="font-weight:600; color:#1b1b21;">{{ attentionCount }}</b> need attention
+          </div>
+          <div style="display:flex; align-items:center; gap:7px; background:#fff; border:1px solid #e8e8ec; border-radius:9px; padding:7px 12px; font-size:12.5px; color:#5b5b66;">
+            <span style="width:8px;height:8px;border-radius:50%;background:oklch(0.64 0.13 150);"></span>
+            <b style="font-weight:600; color:#1b1b21;">{{ doneCount }}</b> done
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div style="flex:1; padding:20px 34px 60px;">
+      <div style="max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:22px;">
+        <sc-for list="{{ groups }}" as="g" hint-placeholder-count="3">
+          <section style="background:#fff; border:1px solid #eaeaee; border-radius:12px; overflow:hidden; box-shadow:0 1px 2px rgba(20,20,30,0.03);">
+            <div onClick="{{ g.toggle }}" style="display:flex; align-items:center; gap:10px; padding:12px 20px; background:#fbfbfc; border-bottom:{{ g.headerBorder }}; cursor:{{ g.cursor }};" style-hover="background:#f7f7f9;">
+              <span style="width:7px; height:7px; border-radius:50%; background:{{ g.accent }}; flex:0 0 auto;"></span>
+              <span style="font-size:12px; font-weight:600; letter-spacing:0.03em; text-transform:uppercase; color:#57575f;">{{ g.label }}</span>
+              <span style="font-family:'IBM Plex Mono',monospace; font-size:12px; color:#a6a6b0;">{{ g.count }}</span>
+              <sc-if value="{{ g.collapsible }}" hint-placeholder-val="{{ true }}">
+                <span style="margin-left:auto; font-size:12px; color:#a6a6b0;">{{ g.toggleLabel }}</span>
+              </sc-if>
+            </div>
+            <sc-if value="{{ g.open }}" hint-placeholder-val="{{ true }}">
+              <div>
+                <sc-for list="{{ g.issues }}" as="it" hint-placeholder-count="3">
+                  <div style="display:flex; align-items:center; gap:13px; padding:{{ rowPadY }} 20px; border-bottom:1px solid #f3f3f6;" style-hover="background:#fafafb;">
+                    <span style="--pulse:{{ it.pulseColor }}; width:9px; height:9px; border-radius:50%; background:{{ it.dot }}; flex:0 0 auto; animation:{{ it.anim }};"></span>
+                    <span style="font-family:'IBM Plex Mono',monospace; font-size:12.5px; color:#98989f; flex:0 0 46px;">{{ it.idLabel }}</span>
+                    <span style="font-size:14px; font-weight:450; letter-spacing:-0.01em; color:#22222a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:0 1 auto;">{{ it.title }}</span>
+                    <sc-if value="{{ it.hasNote }}" hint-placeholder-val="">
+                      <span style="font-size:12.5px; color:{{ it.noteColor }}; background:{{ it.noteBg }}; padding:2px 9px; border-radius:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:340px; flex:0 1 auto;">{{ it.note }}</span>
+                    </sc-if>
+                    <div style="margin-left:auto; display:flex; align-items:center; gap:12px; flex:0 0 auto;">
+                      <sc-if value="{{ it.hasPr }}" hint-placeholder-val="">
+                        <a href="{{ it.prUrl }}" target="_blank" style="display:inline-flex; align-items:center; gap:5px; font-size:12.5px; font-family:'IBM Plex Mono',monospace;">
+                          <span style="width:12px;height:12px;border-radius:3px;border:1.5px solid currentColor;display:inline-block;"></span>{{ it.prLabel }}
+                        </a>
+                      </sc-if>
+                      <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:500; padding:3px 10px; border-radius:20px; background:{{ it.badgeBg }}; color:{{ it.badgeText }}; border:1px solid {{ it.badgeBorder }}; white-space:nowrap;">
+                        <span style="width:6px; height:6px; border-radius:50%; background:{{ it.dot }};"></span>{{ it.stageLabel }}
+                      </span>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+          </section>
+        </sc-for>
+      </div>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1200,&quot;height&quot;:820},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;comfortable&quot;,&quot;compact&quot;],&quot;default&quot;:&quot;comfortable&quot;,&quot;tsType&quot;:&quot;'comfortable' | 'compact'&quot;,&quot;section&quot;:&quot;Display&quot;}}">
+class Component extends DCLogic {
+  state = { filter: 'all', doneOpen: false };
+
+  stages() {
+    // hue-based tokens; cool hues read as "working", warm = attention, green = done, red = blocked
+    return {
+      'in-design':          { label: 'In design',      hue: 285, group: 'progress' },
+      'in-test':            { label: 'In test',        hue: 250, group: 'progress' },
+      'in-code':            { label: 'In code',        hue: 225, group: 'progress' },
+      'in-review':          { label: 'In review',      hue: 200, group: 'progress' },
+      'needs-clarification':{ label: 'Needs clarify',  hue: 70,  group: 'attention' },
+      'aorc-held':          { label: 'AORC held',      hue: 55,  group: 'attention' },
+      'agent-blocked':      { label: 'Blocked',        hue: 25,  group: 'attention' },
+      'done':               { label: 'Done / merged',  hue: 150, group: 'done' },
+    };
+  }
+
+  colors(hue) {
+    return {
+      dot:      `oklch(0.62 0.14 ${hue})`,
+      badgeBg:  `oklch(0.968 0.028 ${hue})`,
+      badgeText:`oklch(0.46 0.12 ${hue})`,
+      badgeBorder:`oklch(0.92 0.045 ${hue})`,
+    };
+  }
+
+  issues() {
+    return [
+      { num: 44, title: 'Add a power function to math_utils', stage: 'in-code', pr: 'https://github.com/aorc/math-utils/pull/112', prNum: 112 },
+      { num: 51, title: 'Vectorized dot product helper', stage: 'in-review', pr: 'https://github.com/aorc/math-utils/pull/118', prNum: 118 },
+      { num: 47, title: 'Support complex numbers in sqrt()', stage: 'in-test' },
+      { num: 53, title: 'Refactor rounding to shared util', stage: 'in-design' },
+      { num: 45, title: 'Factorial with memoization', stage: 'aorc-held', held: 'overlaps math_utils.py with #44' },
+      { num: 49, title: 'Add gcd / lcm helpers', stage: 'needs-clarification', held: 'Which int overflow behavior?' },
+      { num: 38, title: 'Parse scientific notation strings', stage: 'agent-blocked', held: 'test suite fails to install numpy' },
+      { num: 41, title: 'Clamp and lerp utilities', stage: 'done', pr: 'https://github.com/aorc/math-utils/pull/104', prNum: 104 },
+      { num: 36, title: 'Fix off-by-one in fibonacci()', stage: 'done', pr: 'https://github.com/aorc/math-utils/pull/98', prNum: 98 },
+    ];
+  }
+
+  renderVals() {
+    const S = this.stages();
+    const density = this.props.density ?? 'comfortable';
+    const rowPadY = density === 'compact' ? '9px' : '14px';
+    const filter = this.state.filter;
+
+    const all = this.issues().map((it) => {
+      const st = S[it.stage];
+      const c = this.colors(st.hue);
+      const isProgress = st.group === 'progress';
+      const noteWarm = st.group === 'attention';
+      return {
+        ...it,
+        idLabel: `#${it.num}`,
+        stageKey: it.stage,
+        stageLabel: st.label,
+        group: st.group,
+        dot: c.dot,
+        badgeBg: c.badgeBg,
+        badgeText: c.badgeText,
+        badgeBorder: c.badgeBorder,
+        anim: isProgress ? 'aorcPulse 2.6s ease-in-out infinite' : 'none',
+        pulseColor: isProgress ? `oklch(0.62 0.14 ${st.hue} / 0.35)` : 'transparent',
+        hasNote: !!it.held,
+        note: it.held || '',
+        noteColor: noteWarm ? c.badgeText : '#7c7c88',
+        noteBg: noteWarm ? c.badgeBg : '#f4f4f6',
+        hasPr: !!it.pr,
+        prUrl: it.pr || '',
+        prLabel: it.pr ? `PR #${it.prNum}` : '',
+      };
+    });
+
+    const stageOrder = Object.keys(S);
+    const sortByStage = (a, b) => stageOrder.indexOf(a.stageKey) - stageOrder.indexOf(b.stageKey);
+
+    const visible = filter === 'all' ? all : all.filter((i) => i.stageKey === filter);
+
+    const pick = (grp) => visible.filter((i) => i.group === grp).sort(sortByStage);
+    const progress = pick('progress');
+    const attention = pick('attention');
+    const done = pick('done');
+
+    const groups = [];
+    const mk = (id, label, accent, issues, collapsible, open, toggle, toggleLabel) => {
+      if (!issues.length) return;
+      groups.push({
+        id, label, accent, issues, count: issues.length,
+        collapsible, open, toggle: collapsible ? toggle : null,
+        toggleLabel, cursor: collapsible ? 'pointer' : 'default',
+        headerBorder: (open && issues.length) ? '1px solid #f0f0f3' : 'none',
+      });
+    };
+    mk('progress', 'In progress', 'oklch(0.62 0.13 245)', progress, false, true, null, '');
+    mk('attention', 'Needs attention', 'oklch(0.72 0.14 70)', attention, false, true, null, '');
+    mk('done', 'Done / merged', 'oklch(0.64 0.13 150)', done, true, this.state.doneOpen,
+       () => this.setState((s) => ({ doneOpen: !s.doneOpen })),
+       this.state.doneOpen ? 'Hide' : 'Show');
+
+    // sidebar stage list w/ counts
+    const stageList = stageOrder.map((key) => {
+      const st = S[key];
+      const c = this.colors(st.hue);
+      const count = all.filter((i) => i.stageKey === key).length;
+      const active = filter === key;
+      return {
+        key, label: st.label, dot: c.dot, count,
+        onClick: () => this.setState({ filter: active ? 'all' : key }),
+        bg: active ? '#eef0f2' : 'transparent',
+        textColor: active ? '#1b1b21' : '#4c4c56',
+        weight: active ? 500 : 400,
+      };
+    });
+
+    return {
+      groups, stageList, rowPadY,
+      totalCount: all.length,
+      progressCount: all.filter((i) => i.group === 'progress').length,
+      attentionCount: all.filter((i) => i.group === 'attention').length,
+      doneCount: all.filter((i) => i.group === 'done').length,
+      selectAll: () => this.setState({ filter: 'all' }),
+      allBg: filter === 'all' ? '#eef0f2' : 'transparent',
+      allColor: filter === 'all' ? '#1b1b21' : '#4c4c56',
+      allWeight: filter === 'all' ? 500 : 400,
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+# UI bridge dependencies (kept out of pyproject.toml on purpose — the core
+# package and its 580-test suite stay untouched by the UI slice).
+fastapi>=0.110
+uvicorn>=0.29
