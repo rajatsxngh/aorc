@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -132,15 +133,11 @@ def _held_reason(issue, stage: str) -> str | None:
     return None
 
 
-@app.get("/api/issues")
-def api_issues():
-    try:
-        issues = github.list_issues(state="open") + github.list_issues(state="closed")
-        prs = github.list_pull_requests(state="open") + github.list_pull_requests(
-            state="closed"
-        )
-    except Exception as exc:  # surface GitHub/auth failures as a clear 502
-        raise HTTPException(status_code=502, detail=f"GitHub read failed: {exc}")
+def _snapshot(prs) -> dict:
+    """One full read of pipeline state from GitHub (issues + reasons), mapped
+    against an already-fetched PR list. Only ever called by the cache's
+    background thread -- request handlers never talk to GitHub directly."""
+    issues = github.list_issues(state="open") + github.list_issues(state="closed")
 
     # Map each issue to its AORC branch's PR (open one wins over closed).
     pr_by_head = {}
@@ -244,6 +241,7 @@ class Job:
             self.done = True
             self._cond.notify_all()
         _jobs.finished(self.key)
+        _state.poke()  # run ended -> pull fresh labels/PRs right away
 
     def follow(self):
         """Yield output lines from the beginning until the process exits."""
@@ -284,8 +282,85 @@ class JobRegistry:
         with self._lock:
             self._active.pop(key, None)
 
+    def any_active(self) -> bool:
+        with self._lock:
+            return bool(self._active)
+
 
 _jobs = JobRegistry()
+
+
+class StateCache:
+    """In-memory issue state, refreshed from GitHub by one background thread.
+
+    `/api/issues` serves the latest snapshot instantly instead of making the
+    browser wait 10-20s of GitHub round-trips per request. Cadence:
+
+    - issue state every ~8s when idle, ~3s while a run is active (labels move
+      quickly then), and immediately when a run finishes (`poke`);
+    - the PR list only every ~60s -- it changes rarely, and AORC's adapter
+      makes one extra API call per PR, which makes it the expensive read.
+
+    Strictly read-only: this thread is now the *only* place the bridge talks
+    to GitHub, and it only lists/reads. A failed refresh keeps serving the
+    previous snapshot rather than erroring the dashboard.
+    """
+
+    IDLE_INTERVAL = 8.0
+    ACTIVE_INTERVAL = 3.0
+    PR_INTERVAL = 60.0
+
+    def __init__(self) -> None:
+        self._snapshot: dict | None = None
+        self._last_error: str | None = None
+        self._ready = threading.Event()
+        self._wake = threading.Event()
+        self._prs: list = []
+        self._prs_at = 0.0
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def poke(self) -> None:
+        """Refresh now (called when a triggered run finishes)."""
+        self._wake.set()
+
+    def get(self) -> dict:
+        # Only the very first request can wait -- on the initial GitHub read.
+        if not self._ready.wait(timeout=45):
+            raise HTTPException(
+                status_code=502,
+                detail=f"GitHub state not available yet: {self._last_error or 'still loading'}",
+            )
+        assert self._snapshot is not None
+        return self._snapshot
+
+    def _refresh(self) -> None:
+        now = time.monotonic()
+        if not self._prs or now - self._prs_at >= self.PR_INTERVAL:
+            self._prs = github.list_pull_requests(state="open") + github.list_pull_requests(
+                state="closed"
+            )
+            self._prs_at = now
+        self._snapshot = _snapshot(self._prs)
+        self._last_error = None
+        self._ready.set()
+
+    def _loop(self) -> None:
+        while True:
+            try:
+                self._refresh()
+            except Exception as exc:  # keep the stale snapshot; note the error
+                self._last_error = str(exc)
+            interval = self.ACTIVE_INTERVAL if _jobs.any_active() else self.IDLE_INTERVAL
+            self._wake.wait(timeout=interval)
+            self._wake.clear()
+
+
+_state = StateCache()
+
+
+@app.get("/api/issues")
+def api_issues():
+    return _state.get()
 
 
 def _stream(job: Job) -> StreamingResponse:

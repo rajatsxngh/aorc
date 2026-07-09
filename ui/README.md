@@ -1,4 +1,12 @@
-# AORC dashboard UI (Slice 1 — status, Slice 2 — control buttons)
+# AORC dashboard UI (Slice 1 — status, Slice 2 — control buttons, 2.5 — live)
+
+Slice 2.5 makes it self-updating: the bridge keeps an in-memory snapshot of
+issue state refreshed by a background thread (every ~8s idle, ~3s while a
+run is active, instantly when a run finishes), `/api/issues` answers from
+that snapshot in milliseconds, and the frontend polls it every 2.5s and
+re-renders only when something changed. No refresh button, no manual reload.
+The cache thread is the only place the bridge talks to GitHub, and it only
+reads. The Run button is hidden for issues at in-review or done.
 
 Two pieces, both new, neither touches `src/aorc/`:
 

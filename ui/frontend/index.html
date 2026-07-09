@@ -178,7 +178,14 @@ class Component extends DCLogic {
     running: false, panelOpen: false, panelTitle: '', log: '',
   };
 
-  componentDidMount() { this.loadIssues(); }
+  componentDidMount() {
+    // Self-updating: poll the bridge's in-memory cache every 2.5s and
+    // re-render only when the data actually changed. No manual refresh.
+    this.loadIssues();
+    this._poll = setInterval(() => this.loadIssues(), 2500);
+  }
+
+  componentWillUnmount() { clearInterval(this._poll); }
 
   apiBase() {
     // Served from the bridge itself the relative URL works; opened as a bare
@@ -189,7 +196,15 @@ class Component extends DCLogic {
   loadIssues() {
     fetch(this.apiBase() + '/api/issues')
       .then((r) => { if (!r.ok) throw new Error('bridge returned ' + r.status); return r.json(); })
-      .then((data) => this.setState({ issues: data.issues, repo: data.repo, loaded: true, error: null }))
+      .then((data) => {
+        const key = JSON.stringify(data);
+        if (key === this._lastData) {
+          if (this.state.error) this.setState({ error: null });
+          return;                              // nothing changed — skip the re-render
+        }
+        this._lastData = key;
+        this.setState({ issues: data.issues, repo: data.repo, loaded: true, error: null });
+      })
       .catch((e) => this.setState({ error: String(e.message || e), loaded: true }));
   }
 
@@ -277,7 +292,8 @@ class Component extends DCLogic {
       const held = it.stage === 'aorc-held';
       return {
         ...it,
-        showAction: st.group !== 'done',
+        // No Run on in-review (a PR is already up for a human) or done.
+        showAction: st.group !== 'done' && it.stage !== 'in-review',
         actionLabel: held ? 'Release' : 'Run',
         onAction: () => this.runJob(
           held ? `/api/release/${it.num}` : `/api/run-issue/${it.num}`,
