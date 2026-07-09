@@ -13,3 +13,4 @@ dist/
 build/
 .aorc-worktrees/
 sandbox.aorc.yml
+.aorc/
