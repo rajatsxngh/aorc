@@ -230,6 +230,13 @@ class TargetRepoError(Exception):
     from the wrong tree runs the wrong project's toolchain."""
 
 
+class WorktreeSyncConflict(Exception):
+    """S45: rebasing an issue's worktree branch onto the current remote main
+    hit a true conflict. Never auto-resolved (same discipline as
+    `LocalGitOps.rebase`): the rebase is aborted, the worktree left where it
+    was, and dispatch maps this to agent-blocked/re-hold."""
+
+
 DEFAULT_CLONE_DIR = os.path.join(".aorc", "clone")
 
 _REMOTE_SLUG_RE = re.compile(r"[:/]([^/:]+/[^/:]+?)(?:\.git)?/?$")
@@ -365,15 +372,51 @@ class WorktreeManager:
     def _has_remote(self) -> bool:
         return "origin" in self._git("remote", check=False).stdout.split()
 
+    def _worktree_git(self, path: str, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", path, *args], capture_output=True, text=True
+        )
+
+    def _sync_with_main(self, path: str, branch: str) -> None:
+        """S45: bring an existing worktree up to the current remote main.
+        Fetch, then rebase the worktree's branch onto `origin/main`."""
+        self._git("fetch", "origin", check=False)
+        if not self._ref_exists("origin/main"):
+            return
+        # A dirty tree makes `git rebase` refuse outright, and uncommitted
+        # S22-mirrored writes are expected here. When the branch exists on
+        # the remote, every mirrored write was also API-committed there, so
+        # resetting to the fetched tip loses nothing. Otherwise (the branch
+        # never pushed -- mock-backed worlds, a pre-first-commit dispatch)
+        # the uncommitted writes are the only copy: --autostash carries them
+        # across the rebase instead.
+        if self._ref_exists(f"origin/{branch}"):
+            self._worktree_git(path, "reset", "--hard", f"origin/{branch}")
+        proc = self._worktree_git(path, "rebase", "--autostash", "origin/main")
+        if proc.returncode != 0:
+            # Same lines changed on both sides: abort so the worktree is left
+            # exactly where it was (never mid-rebase) and surface the typed
+            # conflict -- dispatch routes it, nothing here auto-resolves.
+            self._worktree_git(path, "rebase", "--abort")
+            raise WorktreeSyncConflict(
+                f"rebasing {branch} onto origin/main conflicts: "
+                f"{(proc.stderr or proc.stdout).strip()}"
+            )
+
     def _ref_exists(self, ref: str) -> bool:
         return self._git("rev-parse", "--verify", "--quiet", ref, check=False).returncode == 0
 
     def ensure(self, issue_number: int) -> str:
         """Create the branch + worktree if this is the first dispatch (or
-        the worktree dir was deleted/never made on this machine); reuse the
-        existing worktree dir as-is on any re-dispatch."""
+        the worktree dir was deleted/never made on this machine); on a
+        re-dispatch, sync the existing worktree with the CURRENT remote
+        main (S45) instead of reusing it blindly -- a held issue released
+        after another issue merged must build on the merged main, or the
+        coder's full-file rewrites silently drop the merged changes."""
         path = self.path_for(issue_number)
         if os.path.isdir(path):
+            if self._has_remote():
+                self._sync_with_main(path, branch_name(issue_number))
             return path
 
         branch = branch_name(issue_number)

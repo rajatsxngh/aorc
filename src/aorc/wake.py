@@ -55,7 +55,13 @@ from .credentials import (
 )
 from .design import rebuild_in_flight_registry
 from .dispatch import DEFAULT_CONCURRENCY, select_dispatch
-from .harness import ContainerHandle, ContainerHarness, ContainerRuntime
+from .guards import BLOCKED_LABEL
+from .harness import (
+    ContainerHandle,
+    ContainerHarness,
+    ContainerRuntime,
+    WorktreeSyncConflict,
+)
 from .interfaces import GitHubClient, Issue, LLMClient
 from .pipeline import (
     HELD_LABEL,
@@ -71,6 +77,10 @@ if TYPE_CHECKING:  # annotation only -- driver.py imports several stage
     from .driver import DriverResult, PipelineDriver
 
 _BRANCH_RE = re.compile(r"^aorc/issue-(\d+)$")
+
+# S45: a worktree/main rebase conflict at dispatch posts one explanatory
+# comment -- greppable marker first, same pattern as every other hard stop.
+SYNC_CONFLICT_MARKER = "<!-- aorc:sync-conflict -->"
 
 
 def issue_for_branch(branch: str) -> int | None:
@@ -166,7 +176,7 @@ class DispatchOutcome:
     `DriverResult` was discarded here, which left `run-issue` printing
     "dispatched" with no way to see why a stage blocked."""
 
-    handle: ContainerHandle
+    handle: ContainerHandle | None
     result: "DriverResult | None" = None
 
 
@@ -364,7 +374,22 @@ class WakeLoop:
         start, nothing else)."""
         token = self._broker.mint(issue_number, self._repo)
         env = self._broker.container_env(token)
-        handle = self.harness.dispatch(issue_number, env)
+        try:
+            handle = self.harness.dispatch(issue_number, env)
+        except WorktreeSyncConflict as conflict:
+            # S45: the issue branch truly conflicts with the freshly-merged
+            # main. Same routing as S17's rebase-conflict rule -- label
+            # agent-blocked, explain, never auto-resolve, never dispatch on
+            # the stale tree.
+            self.github.add_label(issue_number, BLOCKED_LABEL)
+            self.github.set_board_column(issue_number, LABEL_COLUMN[BLOCKED_LABEL])
+            self.github.post_comment(
+                issue_number,
+                f"{SYNC_CONFLICT_MARKER}\nStopping: syncing this issue's "
+                f"worktree with the current main hit a rebase conflict. "
+                f"Labeling `{BLOCKED_LABEL}`.\nReason:\n{conflict}",
+            )
+            return DispatchOutcome(handle=None)
         self.in_flight[issue_number] = (handle, token)
         result = None
         if self.driver is not None:

@@ -645,3 +645,38 @@ def test_wake_sweep_rebuilds_registry_and_reholds_colliding_held_issue():
     assert HELD_LABEL in gh.get_labels(6)
     assert 6 not in loop.in_flight
     assert ("teardown", 6) in runtime.calls
+
+
+# --------------------------------------------------------------------------- #
+# S45: a worktree/main rebase conflict at dispatch maps to agent-blocked
+# --------------------------------------------------------------------------- #
+
+
+def test_dispatch_issue_maps_worktree_sync_conflict_to_agent_blocked():
+    """`WorktreeManager.ensure` raises `WorktreeSyncConflict` when the issue
+    branch truly conflicts with the freshly-merged main (S45). Dispatch must
+    route that like every other hard stop -- label agent-blocked, explain on
+    the issue, claim no in-flight slot -- never crash the wake loop and never
+    silently run on the stale tree."""
+    from aorc.guards import BLOCKED_LABEL
+    from aorc.harness import WorktreeSyncConflict
+
+    class ConflictingWorktrees:
+        def ensure(self, issue_number: int) -> str:
+            raise WorktreeSyncConflict("rebasing aorc/issue-5 onto origin/main conflicts")
+
+    gh = MockGitHubClient(issues=[Issue(number=5)])
+    minter = CountingMinter()
+    clock = Clock()
+    broker = CredentialBroker(PRIVATE_KEY, minter, llm_api_key="sk-" + "p" * 20, clock=clock)
+    loop = WakeLoop.compose(
+        gh, MockContainerRuntime(), ConflictingWorktrees(), broker, repo="acme/widget", clock=clock
+    )
+
+    outcome = loop.dispatch_issue(5)
+
+    assert outcome.handle is None
+    assert 5 not in loop.in_flight
+    assert BLOCKED_LABEL in gh.issues[5].labels
+    comments = [c.body for c in gh.list_comments(5)]
+    assert any("conflict" in body for body in comments)

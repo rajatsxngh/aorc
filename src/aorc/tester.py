@@ -29,7 +29,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from .design import DesignDoc
-from .harness import container_name_for, issue_number_from_worktree_path, write_worktree_file
+from .harness import (
+    container_name_for,
+    issue_number_from_worktree_path,
+    read_worktree_file,
+    write_worktree_file,
+)
 from .interfaces import GitHubClient, LLMClient, Message, strip_code_fences
 from .pipeline import branch_name
 
@@ -530,7 +535,13 @@ class TesterStage:
         whole. The coder overwrites this with the real implementation (it
         writes full file contents to the design's `files`)."""
         branch = branch_name(issue_number)
-        existing = self._github.get_file(path, branch)
+        # S45: the worktree is the synced source of truth -- after a held
+        # issue is released, ensure() has rebased it onto the merged main,
+        # while the API branch view can still be pre-merge. Reading the API
+        # first would rebuild the stale snapshot here and clobber the sync.
+        existing = read_worktree_file(cwd, path)
+        if existing is None:
+            existing = self._github.get_file(path, branch)
         if existing is None:
             content = interface_stub_source(names)
         else:

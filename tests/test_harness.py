@@ -885,3 +885,153 @@ def test_read_worktree_file_skips_dot_cwd_like_write_does():
     # `cwd == "."` means "no real worktree was supplied" (unit-suite default);
     # reading whatever the process cwd happens to hold would be a lie.
     assert read_worktree_file(".", "README.md") is None
+
+
+# --------------------------------------------------------------------------- #
+# S45 -- ensure() syncs an existing worktree with the CURRENT remote main
+# --------------------------------------------------------------------------- #
+# Live multi-issue accumulation bug: issue #37 merged `subtract` to main while
+# issue #36 sat held at the checkpoint; on release, #36's re-dispatch reused
+# its pre-#37 worktree untouched, the coder rewrote the shared file from that
+# stale snapshot, and the merged `subtract` was silently dropped.
+
+
+def _sync_git(args, cwd):
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+    )
+
+
+def _sync_bare_remote(tmp_path, files):
+    remote = tmp_path / "remote.git"
+    _sync_git(["init", "--bare", "-b", "main", str(remote)], cwd=tmp_path)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _sync_git(["init", "-b", "main"], cwd=seed)
+    _sync_git(["config", "user.email", "a@a.com"], cwd=seed)
+    _sync_git(["config", "user.name", "a"], cwd=seed)
+    for name, content in files.items():
+        (seed / name).write_text(content)
+    _sync_git(["add", "."], cwd=seed)
+    _sync_git(["commit", "-m", "init"], cwd=seed)
+    _sync_git(["remote", "add", "origin", str(remote)], cwd=seed)
+    _sync_git(["push", "origin", "main"], cwd=seed)
+    return remote
+
+
+def _sync_clone(remote, dest):
+    _sync_git(["clone", str(remote), str(dest)], cwd=dest.parent)
+    _sync_git(["config", "user.email", "a@a.com"], cwd=dest)
+    _sync_git(["config", "user.name", "a"], cwd=dest)
+    return dest
+
+
+def _push_to_main(remote, tmp_path, name, mutate):
+    """Commit `mutate(current_content)` of file `name` to the remote's main --
+    the stand-in for another issue's PR merging."""
+    scratch = _sync_clone(remote, tmp_path / f"merge-{name}-{mutate.__name__}")
+    target = scratch / name
+    target.write_text(mutate(target.read_text() if target.exists() else ""))
+    _sync_git(["add", "."], cwd=scratch)
+    _sync_git(["commit", "-m", f"merge: {name}"], cwd=scratch)
+    _sync_git(["push", "origin", "main"], cwd=scratch)
+
+
+def test_ensure_syncs_existing_worktree_with_current_remote_main(tmp_path):
+    remote = _sync_bare_remote(
+        tmp_path, {"math_utils.py": "def multiply(a, b):\n    return a * b\n"}
+    )
+    clone = _sync_clone(remote, tmp_path / "clone")
+    worktrees = WorktreeManager(str(clone), str(tmp_path / "worktrees"))
+
+    # first dispatch of issue 36: worktree cut from main-as-of-now
+    path = worktrees.ensure(36)
+    assert "def subtract" not in (Path(path) / "math_utils.py").read_text()
+
+    # issue 37 merges subtract to main while 36 is held
+    def add_subtract(content):
+        return content + "\ndef subtract(a, b):\n    return a - b\n"
+
+    _push_to_main(remote, tmp_path, "math_utils.py", add_subtract)
+
+    # release: re-dispatch calls ensure() again -- must build on merged main
+    path2 = worktrees.ensure(36)
+
+    assert path2 == path
+    assert "def subtract" in (Path(path) / "math_utils.py").read_text()
+
+
+def test_ensure_surfaces_rebase_conflict_as_typed_error_and_aborts(tmp_path):
+    """S45 safety rule: a true conflict between the issue branch and the
+    freshly-merged main is never auto-resolved -- ensure() aborts the rebase
+    (worktree left exactly where it was, never mid-rebase) and raises the
+    typed conflict dispatch maps to agent-blocked, mirroring
+    `LocalGitOps.rebase`'s discriminator discipline."""
+    from aorc.harness import WorktreeSyncConflict
+
+    remote = _sync_bare_remote(
+        tmp_path, {"math_utils.py": "def multiply(a, b):\n    return a * b\n"}
+    )
+    clone = _sync_clone(remote, tmp_path / "clone")
+    worktrees = WorktreeManager(str(clone), str(tmp_path / "worktrees"))
+    path = worktrees.ensure(36)
+
+    # issue 36's own committed work edits the same line another merge changes
+    (Path(path) / "math_utils.py").write_text(
+        "def multiply(x, y):\n    return x * y\n"
+    )
+    _sync_git(["commit", "-am", "issue 36 work"], cwd=path)
+
+    def clashing_edit(content):
+        return "def multiply(a, b, *, scale=1):\n    return a * b * scale\n"
+
+    _push_to_main(remote, tmp_path, "math_utils.py", clashing_edit)
+
+    with pytest.raises(WorktreeSyncConflict):
+        worktrees.ensure(36)
+
+    status = subprocess.run(
+        ["git", "-C", path, "status"], capture_output=True, text=True
+    ).stdout
+    assert "rebase in progress" not in status
+    # the branch's own commit is still intact, exactly where it was
+    log = subprocess.run(
+        ["git", "-C", path, "log", "--format=%s", "-1"], capture_output=True, text=True
+    ).stdout
+    assert "issue 36 work" in log
+
+
+def test_ensure_syncs_a_dirty_worktree_by_resetting_to_remote_branch_tip(tmp_path):
+    """S45 dirty-worktree case: uncommitted S22-mirrored writes may sit in
+    the worktree, and a dirty tree makes `git rebase` refuse outright. Safe
+    because every mirrored write was also API-committed to the remote
+    branch: reset --hard to the fetched branch tip (losing nothing that
+    isn't already on the remote), then rebase onto the current main."""
+    remote = _sync_bare_remote(
+        tmp_path, {"math_utils.py": "def multiply(a, b):\n    return a * b\n"}
+    )
+    clone = _sync_clone(remote, tmp_path / "clone")
+    worktrees = WorktreeManager(str(clone), str(tmp_path / "worktrees"))
+    path = worktrees.ensure(36)
+
+    # issue 36's committed-and-pushed work (the API commit the mirror echoed)
+    (Path(path) / "power.py").write_text("def power(a, b):\n    return a ** b\n")
+    _sync_git(["add", "."], cwd=path)
+    _sync_git(["commit", "-m", "issue 36 work"], cwd=path)
+    _sync_git(["push", "origin", branch_name(36)], cwd=path)
+    # a leftover uncommitted mirror write dirties a tracked file
+    (Path(path) / "math_utils.py").write_text(
+        "def multiply(a, b):\n    return a * b\n# stray mirror leftovers\n"
+    )
+
+    def add_subtract(content):
+        return content + "\ndef subtract(a, b):\n    return a - b\n"
+
+    _push_to_main(remote, tmp_path, "math_utils.py", add_subtract)
+
+    path2 = worktrees.ensure(36)  # must not raise
+
+    content = (Path(path2) / "math_utils.py").read_text()
+    assert "def subtract" in content
+    # the branch's own committed work survives the sync
+    assert (Path(path2) / "power.py").read_text().startswith("def power")

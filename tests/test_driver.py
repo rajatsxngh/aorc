@@ -654,3 +654,87 @@ def test_design_stage_sees_contents_of_files_the_issue_mentions(tmp_path):
 
     design_prompt = "\n".join(m.content for m in llms["design"].calls[0][0])
     assert "def multiply" in design_prompt
+
+
+# ---- S45: released-from-hold issue builds on the CURRENT merged main -------- #
+
+
+_ACCUM_DESIGN_JSON = json.dumps(
+    {
+        "interface": [{"name": "power", "inputs": ["a", "b"], "outputs": "int"}],
+        "test_specs": ["power(2, 3) == 8"],
+        "task_list": ["implement power()"],
+        "files": ["math_utils.py"],
+        "confidence": 0.9,
+    }
+)
+_ACCUM_TEST_JSON = json.dumps(
+    {"tests": [{"task": "implement power()", "code": "def test_power():\n    assert power(2, 3) == 8\n"}]}
+)
+_ACCUM_FULL_FILE = (
+    "def multiply(a, b):\n    return a * b\n\n"
+    "def subtract(a, b):\n    return a - b\n\n"
+    "def power(a, b):\n    return a ** b\n"
+)
+_ACCUM_CODE_JSON = json.dumps(
+    {"tasks": [{"task": "implement power()", "path": "math_utils.py", "code": _ACCUM_FULL_FILE}]}
+)
+
+
+def test_released_issue_builds_on_main_merged_while_it_was_held(tmp_path):
+    """The live multi-issue accumulation bug: issue 37 merged `subtract` to
+    main while issue 36 (power) sat held with its worktree already cut from
+    pre-37 main. On release, the driver must sync that worktree with the
+    CURRENT remote main before any stage consumes it -- the coder writes FULL
+    file contents (S44), so if it is shown the stale snapshot, `subtract` is
+    silently dropped from 36's result."""
+    remote = _init_bare_remote(tmp_path)
+    seed = _real_clone(remote, tmp_path / "seeder")
+    (seed / "math_utils.py").write_text("def multiply(a, b):\n    return a * b\n")
+    _real_git(["add", "."], cwd=seed)
+    _real_git(["commit", "-m", "multiply"], cwd=seed)
+    _real_git(["push", "origin", "main"], cwd=seed)
+
+    local_clone = _real_clone(remote, tmp_path / "local")
+    worktrees = WorktreeManager(str(local_clone), str(tmp_path / "worktrees"))
+
+    # issue 36's first dispatch cut its worktree from pre-37 main, then held
+    worktrees.ensure(36)
+
+    # issue 37 merges subtract to main while 36 is held
+    merger = _real_clone(remote, tmp_path / "merger")
+    (merger / "math_utils.py").write_text(
+        "def multiply(a, b):\n    return a * b\n\ndef subtract(a, b):\n    return a - b\n"
+    )
+    _real_git(["add", "."], cwd=merger)
+    _real_git(["commit", "-m", "S37: subtract (#37)"], cwd=merger)
+    _real_git(["push", "origin", "main"], cwd=merger)
+
+    gh = MockGitHubClient(issues=[Issue(number=36, body="add power to math_utils.py")])
+    coder_llm = MockLLMClient(responses=[_ACCUM_CODE_JSON])
+    runner = MockTestRunner(results=list(_DEFAULT_TEST_RESULTS))
+    design = DesignStage(MockLLMClient(responses=[_ACCUM_DESIGN_JSON]), gh)
+    tester = TestStage(
+        MockLLMClient(responses=[_ACCUM_TEST_JSON]),
+        MockLLMClient(responses=[_CRITIC_APPROVE]),
+        gh,
+        runner,
+    )
+    coder = CoderStage(coder_llm, gh, runner)
+    reviewer = ReviewerStage(MockLLMClient(responses=[_REVIEW_APPROVE]), coder, gh, runner)
+    driver = PipelineDriver(gh, worktrees, design, tester, coder, reviewer)
+
+    result = driver.run(36)  # the release-from-hold re-dispatch
+
+    assert result.status == "proceed"
+    # the coder was SHOWN the merged main's contents (S44 feeds it the
+    # worktree's current file), so 37's subtract cannot be silently dropped
+    coder_prompts = "\n".join(
+        m.content for messages, _ in coder_llm.calls for m in messages
+    )
+    assert "def subtract" in coder_prompts
+    # and 36's final worktree accumulates both: 37's merged function + its own
+    final = (Path(worktrees.ensure(36)) / "math_utils.py").read_text()
+    assert "def multiply" in final
+    assert "def subtract" in final
+    assert "def power" in final
