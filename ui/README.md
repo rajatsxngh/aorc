@@ -1,4 +1,4 @@
-# AORC dashboard UI (Slice 1 — read-only status)
+# AORC dashboard UI (Slice 1 — status, Slice 2 — control buttons)
 
 Two pieces, both new, neither touches `src/aorc/`:
 
@@ -39,3 +39,32 @@ Each issue's stage is derived exactly the way AORC derives it:
 - an open issue with no pipeline label → **Backlog**
 - a PR link appears when a PR exists whose head is the issue's
   `aorc/issue-<n>` branch
+
+## Control buttons (Slice 2)
+
+Three POST endpoints, each spawning AORC's **existing CLI** — the exact
+command you'd type in a terminal:
+
+```
+python -m aorc --dev-pat-minter --config sandbox.aorc.yml --repo <repo> {run-issue N | backfill}
+```
+
+- `POST /api/run-issue/{n}` — the per-issue **Run** button
+- `POST /api/release/{n}` — the **Release** button on held issues (releasing
+  = re-dispatching, which is the same `run-issue` command)
+- `POST /api/backfill` — the global **Run Backfill** button
+
+The response *is* the command's live combined stdout/stderr, streamed line by
+line; the dashboard shows it in a terminal-style panel at the bottom and
+refreshes the issue list when the run exits. Closing the panel does not kill
+the run.
+
+Safety properties:
+
+- The argv is assembled from a fixed template; the only caller-controlled
+  value is an integer issue number FastAPI has already validated. No shell,
+  no arbitrary commands.
+- One run per issue at a time, and backfill never overlaps with any other
+  run — a second click gets a 409 instead of a second process.
+- No pipeline logic is reimplemented here; the buttons drive the same tested
+  CLI, with the same config (`sandbox.aorc.yml`) and env (`.env`).

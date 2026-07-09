@@ -92,6 +92,7 @@
           <p style="margin:6px 0 0; font-size:13.5px; color:#7c7c88; line-height:1.4;">Every issue and where it sits in the design → test → code → review → PR pipeline.</p>
         </div>
         <div style="display:flex; align-items:center; gap:8px; flex:0 0 auto;">
+          <button onClick="{{ onBackfill }}" style="background:#1b1b21; color:#fff; border:none; border-radius:9px; padding:8px 15px; font-size:12.5px; font-weight:500; font-family:inherit; cursor:{{ btnCursor }}; opacity:{{ btnOpacity }};">{{ backfillLabel }}</button>
           <div style="display:flex; align-items:center; gap:7px; background:#fff; border:1px solid #e8e8ec; border-radius:9px; padding:7px 12px; font-size:12.5px; color:#5b5b66;">
             <span style="width:8px;height:8px;border-radius:50%;background:oklch(0.62 0.13 245);"></span>
             <b style="font-weight:600; color:#1b1b21;">{{ progressCount }}</b> in progress
@@ -108,7 +109,7 @@
       </div>
     </header>
 
-    <div style="flex:1; padding:20px 34px 60px;">
+    <div style="flex:1; padding:20px 34px {{ mainPadBottom }};">
       <div style="max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:22px;">
         <sc-if value="{{ hasStatus }}" hint-placeholder-val="">
           <div style="background:#fff; border:1px solid #eaeaee; border-radius:12px; padding:16px 20px; font-size:13.5px; color:{{ statusColor }};">{{ statusNote }}</div>
@@ -134,6 +135,9 @@
                       <span style="font-size:12.5px; color:{{ it.noteColor }}; background:{{ it.noteBg }}; padding:2px 9px; border-radius:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:340px; flex:0 1 auto;">{{ it.note }}</span>
                     </sc-if>
                     <div style="margin-left:auto; display:flex; align-items:center; gap:12px; flex:0 0 auto;">
+                      <sc-if value="{{ it.showAction }}" hint-placeholder-val="">
+                        <button onClick="{{ it.onAction }}" style="font-size:12px; font-weight:500; padding:3px 12px; border-radius:20px; border:1px solid #dcdce2; background:#fff; color:#3c3c46; font-family:inherit; cursor:{{ btnCursor }}; opacity:{{ btnOpacity }};" style-hover="background:#f4f4f6;">{{ it.actionLabel }}</button>
+                      </sc-if>
                       <sc-if value="{{ it.hasPr }}" hint-placeholder-val="">
                         <a href="{{ it.prUrl }}" target="_blank" style="display:inline-flex; align-items:center; gap:5px; font-size:12.5px; font-family:'IBM Plex Mono',monospace;">
                           <span style="width:12px;height:12px;border-radius:3px;border:1.5px solid currentColor;display:inline-block;"></span>{{ it.prLabel }}
@@ -152,20 +156,69 @@
       </div>
     </div>
   </main>
+
+  <!-- LIVE OUTPUT PANEL (Slice 2): streams the CLI run like a terminal -->
+  <sc-if value="{{ panelOpen }}" hint-placeholder-val="">
+    <div style="position:fixed; left:248px; right:0; bottom:0; z-index:50; height:42vh; background:#16161c; border-top:1px solid #2a2a33; box-shadow:0 -8px 24px rgba(10,10,16,0.3); display:flex; flex-direction:column;">
+      <div style="display:flex; align-items:center; gap:10px; padding:10px 20px; border-bottom:1px solid #23232c; flex:0 0 auto;">
+        <span style="--pulse:rgba(255,255,255,0.12); width:8px; height:8px; border-radius:50%; background:{{ panelDot }}; animation:{{ panelAnim }};"></span>
+        <span style="font-family:'IBM Plex Mono',monospace; font-size:12.5px; color:#e4e4ea; font-weight:500;">{{ panelTitle }}</span>
+        <span style="font-size:11.5px; color:#8a8a95;">{{ panelStatus }}</span>
+        <button onClick="{{ closePanel }}" style="margin-left:auto; background:none; border:1px solid #34343e; color:#a9a9b4; border-radius:7px; padding:3px 11px; font-size:11.5px; cursor:pointer; font-family:inherit;" style-hover="background:#23232c;">Close</button>
+      </div>
+      <pre id="aorc-log" style="margin:0; flex:1; overflow:auto; padding:14px 20px; font-family:'IBM Plex Mono',monospace; font-size:12px; line-height:1.55; color:#c9c9d2; white-space:pre-wrap;">{{ logText }}</pre>
+    </div>
+  </sc-if>
 </div>
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1200,&quot;height&quot;:820},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;comfortable&quot;,&quot;compact&quot;],&quot;default&quot;:&quot;comfortable&quot;,&quot;tsType&quot;:&quot;'comfortable' | 'compact'&quot;,&quot;section&quot;:&quot;Display&quot;}}">
 class Component extends DCLogic {
-  state = { filter: 'all', doneOpen: false, issues: [], repo: '', loaded: false, error: null };
+  state = {
+    filter: 'all', doneOpen: false, issues: [], repo: '', loaded: false, error: null,
+    running: false, panelOpen: false, panelTitle: '', log: '',
+  };
 
-  componentDidMount() {
+  componentDidMount() { this.loadIssues(); }
+
+  apiBase() {
     // Served from the bridge itself the relative URL works; opened as a bare
     // file it falls back to the bridge's default port.
-    const base = location.protocol === 'file:' ? 'http://localhost:8000' : '';
-    fetch(base + '/api/issues')
+    return location.protocol === 'file:' ? 'http://localhost:8000' : '';
+  }
+
+  loadIssues() {
+    fetch(this.apiBase() + '/api/issues')
       .then((r) => { if (!r.ok) throw new Error('bridge returned ' + r.status); return r.json(); })
-      .then((data) => this.setState({ issues: data.issues, repo: data.repo, loaded: true }))
+      .then((data) => this.setState({ issues: data.issues, repo: data.repo, loaded: true, error: null }))
       .catch((e) => this.setState({ error: String(e.message || e), loaded: true }));
+  }
+
+  appendLog(text) {
+    this.setState((s) => ({ log: s.log + text }), () => {
+      const el = document.getElementById('aorc-log');
+      if (el) el.scrollTop = el.scrollHeight;   // follow the tail, like a terminal
+    });
+  }
+
+  runJob(path, title) {
+    if (this.state.running) return;
+    this.setState({ running: true, panelOpen: true, panelTitle: title, log: '' });
+    fetch(this.apiBase() + path, { method: 'POST' })
+      .then(async (r) => {
+        if (!r.ok) throw new Error('bridge returned ' + r.status + ': ' + (await r.text()));
+        const reader = r.body.getReader();
+        const dec = new TextDecoder();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          this.appendLog(dec.decode(value, { stream: true }));
+        }
+      })
+      .catch((e) => this.appendLog('\n[dashboard] ' + String(e.message || e) + '\n'))
+      .finally(() => {
+        this.setState({ running: false });
+        this.loadIssues();                       // pull fresh labels/PRs after the run
+      });
   }
 
   stages() {
@@ -221,8 +274,15 @@ class Component extends DCLogic {
       const c = this.colors(st.hue, it.stage);
       const isProgress = st.group === 'progress';
       const noteWarm = st.group === 'attention';
+      const held = it.stage === 'aorc-held';
       return {
         ...it,
+        showAction: st.group !== 'done',
+        actionLabel: held ? 'Release' : 'Run',
+        onAction: () => this.runJob(
+          held ? `/api/release/${it.num}` : `/api/run-issue/${it.num}`,
+          `${held ? 'release' : 'run-issue'} #${it.num} — ${it.title}`,
+        ),
         idLabel: `#${it.num}`,
         stageKey: it.stage,
         stageLabel: st.label,
@@ -292,8 +352,23 @@ class Component extends DCLogic {
           ? 'Loading issues from GitHub…'
           : (all.length === 0 ? 'No issues found in this repository.' : ''));
 
+    const running = this.state.running;
+
     return {
       groups, stageList, rowPadY,
+      // Slice 2: buttons + live output panel
+      onBackfill: () => this.runJob('/api/backfill', 'backfill — triage every open issue'),
+      backfillLabel: running ? 'Running…' : 'Run Backfill',
+      btnCursor: running ? 'default' : 'pointer',
+      btnOpacity: running ? 0.45 : 1,
+      panelOpen: this.state.panelOpen,
+      panelTitle: this.state.panelTitle,
+      panelStatus: running ? 'running — live output' : 'finished',
+      panelDot: running ? 'oklch(0.72 0.14 70)' : 'oklch(0.64 0.13 150)',
+      panelAnim: running ? 'aorcPulse 1.6s ease-in-out infinite' : 'none',
+      logText: this.state.log || (running ? 'Starting…\n' : ''),
+      closePanel: () => this.setState({ panelOpen: false }),
+      mainPadBottom: this.state.panelOpen ? 'calc(42vh + 40px)' : '60px',
       repoLabel: this.state.repo || 'aorc',
       hasStatus: !!statusNote,
       statusNote,
