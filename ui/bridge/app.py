@@ -20,12 +20,14 @@ same port, so no CORS gymnastics are needed).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -58,7 +60,7 @@ _load_dotenv(REPO_ROOT / ".env")
 
 from aorc.clarification import QUESTION_MARKER  # noqa: E402
 from aorc.driver import BLOCKED_PING_MARKER, HELD_PING_MARKER  # noqa: E402
-from aorc.github.sdk_adapter import SdkGitHubClient  # noqa: E402
+from aorc.interfaces import Issue  # noqa: E402
 from aorc.pipeline import (  # noqa: E402
     AWAITING_CONFIG_LABEL,
     HELD_LABEL,
@@ -78,8 +80,6 @@ if not TOKEN:
         "No GitHub token found. Set GITHUB_TOKEN (or AORC_IT_GITHUB_TOKEN in "
         "the repo-root .env) before starting the bridge."
     )
-
-github = SdkGitHubClient(TOKEN, REPO)
 
 # The orchestrator's own hold/block comments carry these markers (driver.py);
 # the reason text follows them in a fixed phrasing.
@@ -124,30 +124,77 @@ def _held_reason(issue, stage: str) -> str | None:
         "agent-blocked": (BLOCKED_PING_MARKER, _BLOCKED_REASON_RE),
         "needs-clarification": (QUESTION_MARKER, _QUESTION_RE),
     }[stage]
-    for comment in reversed(github.list_comments(issue.number)):
-        if marker in comment.body:
-            match = pattern.search(comment.body)
+    for comment in reversed(_github_rest(f"/issues/{issue.number}/comments")):
+        body = comment.get("body") or ""
+        if marker in body:
+            match = pattern.search(body)
             if match:
                 return " ".join(match.group(1).split())[:300]
             return None
     return None
 
 
-def _snapshot(prs) -> dict:
-    """One full read of pipeline state from GitHub (issues + reasons), mapped
-    against an already-fetched PR list. Only ever called by the cache's
-    background thread -- request handlers never talk to GitHub directly."""
-    issues = github.list_issues(state="open") + github.list_issues(state="closed")
+def _github_rest(path: str) -> list | dict:
+    """One raw read-only GitHub REST call (stdlib urllib). The dashboard's
+    *interpretation* of state stays AORC's (aorc.pipeline label rules, the
+    Issue dataclass, AORC's own comment markers) but the *transport* is raw
+    REST: AORC's adapter is built for pipeline work, not display -- listing
+    issues completes each one (one hidden API call per issue) and its PR
+    list fetches every PR's changed files, which made a dashboard refresh
+    take 20-30s instead of ~2s."""
+    req = urllib.request.Request(f"https://api.github.com/repos/{REPO}{path}")
+    req.add_header("Authorization", f"Bearer {TOKEN}")
+    req.add_header("User-Agent", "aorc-ui-bridge")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
 
-    # Map each issue to its AORC branch's PR (open one wins over closed).
-    pr_by_head = {}
-    for pr in reversed(prs):  # earlier in list = open = takes precedence
-        pr_by_head[pr.head] = pr
+
+def _fetch_pr_heads() -> dict[str, int]:
+    """branch name -> PR number, newest first, an open PR always winning."""
+    prs = _github_rest("/pulls?state=all&per_page=100")
+    by_head: dict[str, int] = {}
+    for pr in sorted(prs, key=lambda p: p["state"] != "open"):  # open first
+        by_head.setdefault(pr["head"]["ref"], pr["number"])
+    return by_head
+
+
+def _fetch_issues() -> list[Issue]:
+    """All issues (open + closed) in one or two API calls, as AORC's own
+    Issue dataclass. The /issues listing includes PRs; entries carrying a
+    `pull_request` key are PRs and are dropped -- same rule as AORC's
+    adapter, without its one-call-per-issue cost."""
+    issues: list[Issue] = []
+    page = 1
+    while True:
+        batch = _github_rest(f"/issues?state=all&per_page=100&page={page}")
+        for raw in batch:
+            if "pull_request" in raw:
+                continue
+            issues.append(
+                Issue(
+                    number=raw["number"],
+                    title=raw.get("title") or "",
+                    body=raw.get("body") or "",
+                    labels=[label["name"] for label in raw.get("labels", [])],
+                    state=raw.get("state") or "open",
+                )
+            )
+        if len(batch) < 100:
+            return issues
+        page += 1
+
+
+def _snapshot(pr_by_head: dict[str, int]) -> dict:
+    """One full read of pipeline state from GitHub (issues + reasons), mapped
+    against an already-fetched branch->PR mapping. Only ever called by the
+    cache's background thread -- request handlers never talk to GitHub
+    directly."""
+    issues = _fetch_issues()
 
     out = []
     for issue in issues:
         stage = _stage_for(issue)
-        pr = pr_by_head.get(branch_name(issue.number))
+        pr_number = pr_by_head.get(branch_name(issue.number))
         held_reason = None
         try:
             held_reason = _held_reason(issue, stage)
@@ -159,11 +206,11 @@ def _snapshot(prs) -> dict:
                 "title": issue.title,
                 "stage": stage,
                 "held_reason": held_reason,
-                "pr_number": pr.number if pr else None,
-                "pr_url": f"https://github.com/{REPO}/pull/{pr.number}" if pr else None,
+                "pr_number": pr_number,
+                "pr_url": f"https://github.com/{REPO}/pull/{pr_number}" if pr_number else None,
             }
         )
-    return {"repo": REPO, "issues": out}
+    return {"repo": REPO, "issues": out, "as_of": time.time()}
 
 
 # --------------------------------------------------------------------------- #
@@ -296,32 +343,66 @@ class StateCache:
     `/api/issues` serves the latest snapshot instantly instead of making the
     browser wait 10-20s of GitHub round-trips per request. Cadence:
 
-    - issue state every ~8s when idle, ~3s while a run is active (labels move
-      quickly then), and immediately when a run finishes (`poke`);
-    - the PR list only every ~60s -- it changes rarely, and AORC's adapter
-      makes one extra API call per PR, which makes it the expensive read.
+    - a *change detector* pings GitHub every ~2s with a conditional request
+      (`If-None-Match`): a 304 "nothing changed" answer is free against the
+      API rate limit, and the moment anything about any issue/PR changes the
+      answer is a 200 -- which triggers a full refresh immediately. This is
+      what makes the dashboard feel live (~2-4s GitHub -> UI) without
+      hammering the API;
+    - full issue state also refreshes every ~30s as a fallback, ~3s while a
+      run is active (labels move quickly then), and immediately when a run
+      finishes (`poke`). A refresh is a handful of API calls and takes a
+      couple of seconds.
 
-    Strictly read-only: this thread is now the *only* place the bridge talks
-    to GitHub, and it only lists/reads. A failed refresh keeps serving the
-    previous snapshot rather than erroring the dashboard.
+    Strictly read-only: the bridge only lists/reads. A failed refresh keeps
+    serving the previous snapshot rather than erroring the dashboard.
     """
 
-    IDLE_INTERVAL = 8.0
+    IDLE_INTERVAL = 30.0
     ACTIVE_INTERVAL = 3.0
-    PR_INTERVAL = 60.0
+    DETECT_INTERVAL = 2.0
 
     def __init__(self) -> None:
         self._snapshot: dict | None = None
         self._last_error: str | None = None
         self._ready = threading.Event()
         self._wake = threading.Event()
-        self._prs: list = []
-        self._prs_at = 0.0
         threading.Thread(target=self._loop, daemon=True).start()
+        threading.Thread(target=self._detect_loop, daemon=True).start()
 
     def poke(self) -> None:
-        """Refresh now (called when a triggered run finishes)."""
+        """Refresh now (run finished, or the detector saw a change)."""
         self._wake.set()
+
+    def _detect_loop(self) -> None:
+        """Cheap 'did anything change?' poll. GitHub answers a conditional
+        request with 304 (free, no rate-limit cost) until any issue or PR in
+        the repo is updated; the first 200 after that carries a new ETag and
+        triggers a full refresh."""
+        url = (
+            f"https://api.github.com/repos/{REPO}/issues"
+            "?state=all&sort=updated&direction=desc&per_page=1"
+        )
+        etag: str | None = None
+        while True:
+            time.sleep(self.DETECT_INTERVAL)
+            try:
+                req = urllib.request.Request(url)
+                req.add_header("Authorization", f"Bearer {TOKEN}")
+                req.add_header("User-Agent", "aorc-ui-bridge")
+                if etag:
+                    req.add_header("If-None-Match", etag)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    new_etag = resp.headers.get("ETag")
+                    changed = etag is not None  # very first 200 is just priming
+                    etag = new_etag or etag
+                    if changed:
+                        self.poke()
+            except urllib.error.HTTPError as exc:
+                if exc.code != 304:  # 304 = nothing changed, the happy path
+                    time.sleep(10)  # real error: back off, keep serving cache
+            except Exception:
+                time.sleep(10)
 
     def get(self) -> dict:
         # Only the very first request can wait -- on the initial GitHub read.
@@ -334,13 +415,7 @@ class StateCache:
         return self._snapshot
 
     def _refresh(self) -> None:
-        now = time.monotonic()
-        if not self._prs or now - self._prs_at >= self.PR_INTERVAL:
-            self._prs = github.list_pull_requests(state="open") + github.list_pull_requests(
-                state="closed"
-            )
-            self._prs_at = now
-        self._snapshot = _snapshot(self._prs)
+        self._snapshot = _snapshot(_fetch_pr_heads())
         self._last_error = None
         self._ready.set()
 

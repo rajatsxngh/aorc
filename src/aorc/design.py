@@ -106,22 +106,44 @@ def resolve_design_files(files: list, cwd: str) -> list:
     the coder's writes -- inherits the error consistently, so nothing ever
     fails loudly. An entry that exists at its stated path is kept; a
     missing entry whose basename matches exactly one file in the tree is
-    snapped to that file; new or ambiguous entries are kept verbatim
-    (never guessed)."""
+    snapped to that file. S49: a brand-new file whose stated parent
+    directory doesn't exist but matches exactly one real directory by path
+    suffix ("sandbox" -> "src/sandbox") is snapped into that directory --
+    live (issues 66/67), a new-module design said sandbox/validators.py in
+    a src-layout repo, so the interface stub and the coder's writes landed
+    at the repo root while the generated tests imported the *installed*
+    src/sandbox package: ModuleNotFoundError on every attempt, classified
+    'error', never 'red'. Ambiguous entries are still kept verbatim (never
+    guessed)."""
     resolved = []
     for entry in files:
         if not isinstance(entry, str) or os.path.exists(os.path.join(cwd, entry)):
             resolved.append(entry)
             continue
         basename = os.path.basename(entry)
+        parent = os.path.dirname(entry).replace(os.sep, "/").strip("/")
         matches = []
+        dir_matches = []
         for root, dirs, names in os.walk(cwd):
             dirs[:] = [d for d in dirs if d not in _RESOLVE_SKIP_DIRS]
             if basename in names:
                 matches.append(
                     os.path.relpath(os.path.join(root, basename), cwd).replace(os.sep, "/")
                 )
-        resolved.append(matches[0] if len(matches) == 1 else entry)
+            for d in dirs:
+                rel = os.path.relpath(os.path.join(root, d), cwd).replace(os.sep, "/")
+                if parent and (rel == parent or rel.endswith("/" + parent)):
+                    dir_matches.append(rel)
+        if len(matches) == 1:
+            resolved.append(matches[0])
+        elif (
+            parent
+            and not os.path.isdir(os.path.join(cwd, parent))
+            and len(dir_matches) == 1
+        ):
+            resolved.append(f"{dir_matches[0]}/{basename}")
+        else:
+            resolved.append(entry)
     return resolved
 
 

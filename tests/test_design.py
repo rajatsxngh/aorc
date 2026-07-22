@@ -288,6 +288,46 @@ def test_resolve_design_files_ignores_vcs_and_cache_dirs(tmp_path):
     assert resolve_design_files(["math_utils.py"], str(tmp_path)) == ["src/math_utils.py"]
 
 
+def test_resolve_design_files_snaps_a_new_file_into_its_unique_real_dir(tmp_path):
+    """S49 (live issues 66/67): a design for a brand-new module said
+    `sandbox/validators.py` in a src-layout repo where the package actually
+    lives at src/sandbox/. The old resolver only snapped *existing* files,
+    so the stub and the coder's writes landed at the repo root while the
+    generated tests imported the installed src/sandbox package --
+    ModuleNotFoundError, classified 'error', blocked every attempt."""
+    from aorc.design import resolve_design_files
+
+    (tmp_path / "src" / "sandbox").mkdir(parents=True)
+    (tmp_path / "src" / "sandbox" / "math_utils.py").write_text("")
+
+    resolved = resolve_design_files(["sandbox/validators.py"], str(tmp_path))
+
+    assert resolved == ["src/sandbox/validators.py"]
+
+
+def test_resolve_design_files_keeps_new_file_when_its_stated_dir_exists(tmp_path):
+    from aorc.design import resolve_design_files
+
+    (tmp_path / "sandbox").mkdir()
+
+    # the stated parent directory is real -> a new file there is intentional
+    assert resolve_design_files(["sandbox/validators.py"], str(tmp_path)) == [
+        "sandbox/validators.py"
+    ]
+
+
+def test_resolve_design_files_keeps_new_file_when_parent_dir_is_ambiguous(tmp_path):
+    from aorc.design import resolve_design_files
+
+    (tmp_path / "src" / "sandbox").mkdir(parents=True)
+    (tmp_path / "vendor" / "sandbox").mkdir(parents=True)
+
+    # two directories match `sandbox` -> never guessed, kept verbatim
+    assert resolve_design_files(["sandbox/validators.py"], str(tmp_path)) == [
+        "sandbox/validators.py"
+    ]
+
+
 # ---- S44: files the issue text mentions ------------------------------------ #
 
 
