@@ -46,7 +46,7 @@ flowchart TD
     Q -->|"slot free"| TOK["Mint a scoped, short-lived<br/>per-issue token"]
     TOK --> CON["Start the build container<br/>docker run -d, issue worktree mounted"]
     CON --> DES["Design: design doc committed to the branch,<br/>declaring the files this issue will touch"]
-    DES --> CHK["Collision checkpoint: claimed files vs<br/>other in-flight claims, open PR changed files,<br/>and Graphify blast radius"]
+    DES --> CHK["Collision checkpoint: claimed files vs<br/>other in-flight claims and<br/>open PR changed files"]
     CHK --> OV{"Overlap?"}
     OV -->|"overlap"| HELD["HELD: docker rm -f the container.<br/>Branch, worktree and design doc survive"]
     OV -->|"clear"| TST["Test: failing tests written first,<br/>a critic reviews them"]
@@ -115,11 +115,13 @@ flowchart LR
 
 Every LLM call, file write and git commit happens on the host. What crosses into the container is the *execution of generated code* — the `setup`, `test`, `lint`, coverage and smoke commands from the target repo's config, run via `docker exec` against the mounted worktree. That is the untrusted part, and it is the only part that needs sealing.
 
+Two configurations opt out of that boundary and run the same commands as host subprocesses instead: `container.runtime: actions`, which has no local container to exec into, and the explicit `--no-container` dev flag.
+
 Running the stages themselves inside the agent's own container — the full in-agent execution path — remains out of scope for v1.
 
 ### Concurrency is gated on declared file overlap
 
-After design (and only after design, because that's when the touched files are known), the orchestrator compares the issue's claimed files against all in-flight work and open PRs. Non-overlapping issues run in parallel; overlapping ones are held with a breadcrumb comment explaining why. When the blocking work merges, the held issue is released, rebased onto the new `main`, and re-run — so it accumulates on top of finished work rather than clobbering it.
+After design (and only after design, because that's when the touched files are known), the orchestrator compares the issue's claimed files against all in-flight work and open PRs. Live, this is a path intersection: the import/call blast-radius widening is implemented but has no live caller (see [Known gaps](#known-gaps)). Non-overlapping issues run in parallel; overlapping ones are held with a breadcrumb comment explaining why. When the blocking work merges, the held issue is released, rebased onto the new `main`, and re-run — so it accumulates on top of finished work rather than clobbering it.
 
 Verified live: two issues touching the same file were correctly sequenced while an independent issue ran in parallel; the released issue's output contained the merged changes plus its own.
 
@@ -151,6 +153,7 @@ Listed honestly, because the difference between "implemented" and "wired into th
 | **Concurrency ceiling** | Enforced only in the batch dispatch path. Direct single-issue runs bypass it. |
 | **Import path derivation** | The test import header is machine-written from the design's declared file path. When the design declares an unresolvable path (a typo, or a bare filename for a new module), the derivation faithfully produces an unimportable module. No validation currently checks that the derived module is reachable from the repo's declared source roots. |
 | **Generated test file accumulation** | Per-issue test files are committed to the target repo and accumulate over runs. |
+| **Graphify blast radius** | Implemented across the collision checkpoint, the design stage's context, and the rollback verdict — but every constructor defaults it to `None` and `compose()` never passes one. Collision detection is therefore path-intersection only; two issues touching different files that import each other pass clean. |
 
 The recurring theme across all of these: **the components work; the wiring is where the bugs live.** Several were found only by running the system live after the unit tests were green.
 
