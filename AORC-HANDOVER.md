@@ -96,7 +96,7 @@ that line. Part 5 lists every one of them, verified against the source.
 export PATH="$HOME/.local/bin:$PATH"      # uv
 uv venv --python 3.12                      # create .venv (once)
 uv pip install -e ".[dev]"                 # pytest etc. (once)
-.venv/bin/pytest -q                        # 583 pass, 13 integration deselected
+.venv/bin/pytest -q                        # 580 pass, 13 integration deselected
 ```
 
 The unit suite runs with **zero third-party dependencies** — no network, no
@@ -462,7 +462,7 @@ else. PyGithub, `anthropic`, and `openai` live behind adapters
 (`github/sdk_adapter.py`, `llm/claude_adapter.py`, `llm/openai_adapter.py`),
 all lazily imported.
 
-**Why:** the whole pipeline becomes testable with in-memory mocks. 583 tests
+**Why:** the whole pipeline becomes testable with in-memory mocks. 580 tests
 run with no network, no Docker, no credentials, in ~12 seconds. That is what
 made it possible to build 49 slices without a live environment at every step.
 
@@ -767,7 +767,7 @@ If ticket-level traceability matters to you, that's a gap to backfill.
 
 ```sh
 .venv/bin/pytest -q
-# 583 passed, 13 deselected, 2 warnings in ~12s
+# 580 passed, 13 deselected, 2 warnings in ~12s
 ```
 
 The 13 deselected are `tests/integration/` — real adapters, gated on
@@ -896,7 +896,7 @@ src/aorc/
   gitops.py        LocalGitOps — real rebase/revert
   github/          SDK adapter, mock, App-token exchange, Actions runtime
   llm/             factory, Claude adapter, OpenAI-compatible adapter, mock
-tests/             583 unit tests + 6 credential-gated integration files
+tests/             580 unit tests + 6 credential-gated integration files
 ui/                dashboard bridge + frontend (branch ui-build, additive)
 ```
 
