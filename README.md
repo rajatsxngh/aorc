@@ -165,6 +165,8 @@ This table is a summary. [AORC-HANDOVER.md](AORC-HANDOVER.md) Part 5 is the auth
 
 Requires Docker, Python 3.12, and a GitHub token scoped to the target repository.
 
+Setting up from a fresh clone: **[SETUP.md](SETUP.md)** walks the whole sequence, including the two files a clone can't give you — `.env` and the orchestrator-side config are both gitignored, so you have to write them yourself.
+
 ### Install
 
 Python comes from [uv](https://github.com/astral-sh/uv):
@@ -288,6 +290,7 @@ tests/                580 tests + tests/integration/ (6 credential-gated files)
 
 ## Further reading
 
+- **[SETUP.md](SETUP.md)** — step-by-step setup from a fresh clone: the files you must create yourself, the base image, the install PR, and how to point the dashboard at your own repository.
 - **[AORC-HANDOVER.md](AORC-HANDOVER.md)** — start here for a full account: setup from scratch, the architecture decisions, and an authoritative status of what is wired vs. not.
 - **[HOW-IT-WORKS.md](HOW-IT-WORKS.md)** — a short guided tour of the code with file references.
 - **[AORC-DEEP-DIVE.md](AORC-DEEP-DIVE.md)** — module-by-module reference with a full dry-run trace.
